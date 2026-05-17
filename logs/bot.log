@@ -1,0 +1,115 @@
+2026-05-16 14:30:57 [INFO] smc_bot: ============================================================
+2026-05-16 14:30:57 [INFO] smc_bot: 🚀 Smart Money MOEX Bot запускается
+2026-05-16 14:30:57 [INFO] smc_bot:    Прайм-тайм:    10:00–12:00 МСК
+2026-05-16 14:30:57 [INFO] smc_bot:    Интервал:      каждые 5 мин
+2026-05-16 14:30:57 [INFO] smc_bot:    Таймфрейм ISS: 10
+2026-05-16 14:30:57 [INFO] smc_bot:    Параллельно:   10 тикеров
+2026-05-16 14:30:57 [INFO] smc_bot:    Min цена:      1.0 ₽
+2026-05-16 14:30:57 [INFO] smc_bot:    Min объём:     100,000
+2026-05-16 14:30:57 [INFO] smc_bot:    Chat ID:       -5250659153
+2026-05-16 14:30:57 [INFO] smc_bot: ============================================================
+2026-05-16 14:30:59 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-16 14:30:59 [INFO] smc_bot: Бот запущен. Ctrl+C для остановки.
+2026-05-16 14:31:03 [INFO] apscheduler.scheduler: Added job "scanner_job" to job store "default"
+2026-05-16 14:31:03 [INFO] apscheduler.scheduler: Scheduler started
+2026-05-16 14:31:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:36:04 UTC)" (scheduled at 2026-05-16 11:31:04.606932+00:00)
+2026-05-16 14:31:12 [INFO] smc_bot: Загружено 220 тикеров с TQBR
+2026-05-16 14:31:12 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 14:33:03 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 14:33:03 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 14:33:03 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:36:04 UTC)" executed successfully
+2026-05-16 14:36:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:41:04 UTC)" (scheduled at 2026-05-16 11:36:04.606932+00:00)
+2026-05-16 14:36:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 14:38:32 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 14:38:32 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 14:38:32 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:41:04 UTC)" executed successfully
+2026-05-16 14:41:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:46:04 UTC)" (scheduled at 2026-05-16 11:41:04.606932+00:00)
+2026-05-16 14:41:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 14:42:47 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 14:42:47 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 14:42:47 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:46:04 UTC)" executed successfully
+2026-05-16 14:46:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:51:04 UTC)" (scheduled at 2026-05-16 11:46:04.606932+00:00)
+2026-05-16 14:46:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 14:49:45 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 14:49:45 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 14:49:45 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:51:04 UTC)" executed successfully
+2026-05-16 14:51:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:56:04 UTC)" (scheduled at 2026-05-16 11:51:04.606932+00:00)
+2026-05-16 14:51:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 14:53:56 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 14:53:56 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 14:53:56 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 11:56:04 UTC)" executed successfully
+2026-05-16 14:56:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:01:04 UTC)" (scheduled at 2026-05-16 11:56:04.606932+00:00)
+2026-05-16 14:56:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 15:00:10 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 15:00:10 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 15:00:10 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:01:04 UTC)" executed successfully
+2026-05-16 15:01:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:06:04 UTC)" (scheduled at 2026-05-16 12:01:04.606932+00:00)
+2026-05-16 15:01:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 15:03:32 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 15:03:32 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 15:03:32 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:06:04 UTC)" executed successfully
+2026-05-16 15:06:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:11:04 UTC)" (scheduled at 2026-05-16 12:06:04.606932+00:00)
+2026-05-16 15:06:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 15:08:04 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 15:08:04 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 15:08:04 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:11:04 UTC)" executed successfully
+2026-05-16 15:11:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:16:04 UTC)" (scheduled at 2026-05-16 12:11:04.606932+00:00)
+2026-05-16 15:11:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 15:14:36 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 15:14:36 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 15:14:36 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:16:04 UTC)" executed successfully
+2026-05-16 15:16:04 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:21:04 UTC)" (scheduled at 2026-05-16 12:16:04.606932+00:00)
+2026-05-16 15:16:04 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–12:00 МСК
+2026-05-16 15:17:11 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 15:17:11 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 15:17:11 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 12:21:04 UTC)" executed successfully
+2026-05-16 22:12:29 [INFO] smc_bot: ============================================================
+2026-05-16 22:12:29 [INFO] smc_bot: 🚀 Smart Money MOEX Bot запускается
+2026-05-16 22:12:29 [INFO] smc_bot:    Прайм-тайм:    10:00–18:50 МСК
+2026-05-16 22:12:29 [INFO] smc_bot:    Интервал:      каждые 5 мин
+2026-05-16 22:12:29 [INFO] smc_bot:    Таймфрейм:     10 мин (ISS interval=10)
+2026-05-16 22:12:29 [INFO] smc_bot:    Свечей:        60
+2026-05-16 22:12:29 [INFO] smc_bot:    Параллельно:   8 тикеров
+2026-05-16 22:12:29 [INFO] smc_bot:    Min цена:      1.0 ₽
+2026-05-16 22:12:29 [INFO] smc_bot:    Min объём:     10,000 шт/свечу
+2026-05-16 22:12:29 [INFO] smc_bot:    Chat ID:       -5250659153
+2026-05-16 22:12:29 [INFO] smc_bot: ============================================================
+2026-05-16 22:12:30 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-16 22:12:30 [INFO] smc_bot: Бот запущен. Ctrl+C для остановки.
+2026-05-16 22:12:31 [INFO] apscheduler.scheduler: Added job "scanner_job" to job store "default"
+2026-05-16 22:12:31 [INFO] apscheduler.scheduler: Scheduler started
+2026-05-16 22:12:35 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:17:35 UTC)" (scheduled at 2026-05-16 19:12:35.820600+00:00)
+2026-05-16 22:12:37 [INFO] smc_bot: Тикеров загружено с TQBR: 220
+2026-05-16 22:12:37 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–18:50 МСК | TF=10м
+2026-05-16 22:14:27 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 22:14:27 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 22:14:27 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:17:35 UTC)" executed successfully
+2026-05-16 22:17:35 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:22:35 UTC)" (scheduled at 2026-05-16 19:17:35.820600+00:00)
+2026-05-16 22:17:35 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–18:50 МСК | TF=10м
+2026-05-16 22:19:29 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 22:19:29 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 22:19:29 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:22:35 UTC)" executed successfully
+2026-05-16 22:21:10 [INFO] smc_bot: ============================================================
+2026-05-16 22:21:10 [INFO] smc_bot: 🚀 Smart Money MOEX Bot запускается
+2026-05-16 22:21:10 [INFO] smc_bot:    Прайм-тайм:    10:00–18:50 МСК
+2026-05-16 22:21:11 [INFO] smc_bot:    Интервал:      каждые 5 мин
+2026-05-16 22:21:11 [INFO] smc_bot:    Таймфрейм ISS: 10
+2026-05-16 22:21:11 [INFO] smc_bot:    Параллельно:   8 тикеров
+2026-05-16 22:21:11 [INFO] smc_bot:    Min цена:      1.0 ₽
+2026-05-16 22:21:11 [INFO] smc_bot:    Min объём:     10,000
+2026-05-16 22:21:11 [INFO] smc_bot:    Chat ID:       -5250659153
+2026-05-16 22:21:11 [INFO] smc_bot: ============================================================
+2026-05-16 22:21:12 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-16 22:21:12 [INFO] smc_bot: Бот запущен. Ctrl+C для остановки.
+2026-05-16 22:21:15 [INFO] apscheduler.scheduler: Added job "scanner_job" to job store "default"
+2026-05-16 22:21:15 [INFO] apscheduler.scheduler: Scheduler started
+2026-05-16 22:21:17 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:26:17 UTC)" (scheduled at 2026-05-16 19:21:17.539486+00:00)
+2026-05-16 22:21:19 [INFO] smc_bot: Загружено 220 тикеров с TQBR
+2026-05-16 22:21:19 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–18:50 МСК
+2026-05-16 22:21:19 [WARNING] smc_bot: Не удалось загрузить данные индекса MOEX
+2026-05-16 22:25:55 [INFO] smc_bot: Итог: 0 сигналов из 220 тикеров
+2026-05-16 22:25:55 [INFO] smc_bot: Автосканер: сигналов нет
+2026-05-16 22:25:55 [INFO] apscheduler.executors.default: Job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:26:17 UTC)" executed successfully
+2026-05-16 22:26:17 [INFO] apscheduler.executors.default: Running job "scanner_job (trigger: interval[0:05:00], next run at: 2026-05-16 19:31:17 UTC)" (scheduled at 2026-05-16 19:26:17.539486+00:00)
+2026-05-16 22:26:17 [INFO] smc_bot: Сканирование 220 тикеров | прайм-тайм 10:00–18:50 МСК
+2026-05-16 22:26:19 [WARNING] smc_bot: Не удалось загрузить данные индекса MOEX

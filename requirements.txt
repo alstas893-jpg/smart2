@@ -1,0 +1,18 @@
+# Smart Money MOEX Bot — зависимости
+# Установка: pip install -r requirements.txt
+
+# Telegram Bot Framework
+python-telegram-bot==20.7
+
+# HTTP Client
+aiohttp==3.9.3
+
+# Data Processing
+pandas==2.2.0
+numpy==1.26.3
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Async Support (для Windows)
+pywin32==306; sys_platform == 'win32'
