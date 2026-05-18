@@ -37,7 +37,7 @@ TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "VTBR", "ROSN", "TATN", "NVTK", "PLZL
 INTERVAL = 1  # минут
 CANDLES = 100  # количество свечей для анализа
 
-# Правильные URL как в первом боте
+# Правильные URL
 BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities"
 
 # Глобальные переменные
@@ -45,11 +45,13 @@ start_time = time.time()
 last_signals = {}
 total_cycles = 0
 signals_found = 0
+ticks_with_data = 0
+ticks_without_data = 0
 
 # ================= MOEX API FUNCTIONS =================
 
 async def fetch_json(session, url, retries=3):
-    """Безопасное получение JSON - без ошибок в логах"""
+    """Безопасное получение JSON"""
     headers = {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0'
@@ -58,10 +60,9 @@ async def fetch_json(session, url, retries=3):
     for attempt in range(retries):
         try:
             async with session.get(url, headers=headers) as response:
-                # Проверяем content-type перед парсингом
                 ct = response.headers.get('content-type', '')
                 
-                # Если HTML - сразу возвращаем None без ошибок
+                # Пропускаем HTML ответы
                 if 'html' in ct.lower():
                     return None
                 
@@ -89,7 +90,7 @@ async def fetch_json(session, url, retries=3):
 
 
 async def get_candles(session, ticker):
-    """Получение свечных данных"""
+    """Получение свечных данных с диагностикой"""
     till = datetime.now().strftime('%Y-%m-%d')
     frm = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
     
@@ -98,6 +99,7 @@ async def get_candles(session, ticker):
     
     data = await fetch_json(session, url)
     if not data or 'candles' not in data:
+        logger.warning(f"❌ {ticker}: API не вернул данные")
         return None
     
     try:
@@ -105,32 +107,45 @@ async def get_candles(session, ticker):
         cols = data['candles']['columns']
         
         if not rows:
+            logger.warning(f"❌ {ticker}: Пустой массив свечей (0 записей)")
             return None
         
         df = pd.DataFrame(rows, columns=cols)
         df = df.rename(columns={'begin': 'date'})
         
         need = ['date', 'open', 'high', 'low', 'close', 'volume']
-        df = df[need].copy()
+        available_cols = [c for c in need if c in df.columns]
+        
+        if len(available_cols) < 5:
+            logger.warning(f"❌ {ticker}: Нет нужных колонок. Доступны: {list(df.columns)}")
+            return None
+        
+        df = df[available_cols].copy()
         
         df['date'] = pd.to_datetime(df['date'])
-        for c in need[1:]:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+        for c in available_cols:
+            if c != 'date':
+                df[c] = pd.to_numeric(df[c], errors='coerce')
         
         df = df.dropna().sort_values('date')
         df = df.tail(CANDLES)
         
         if len(df) < 50:
+            logger.warning(f"❌ {ticker}: Мало свечей ({len(df)} < 50)")
             return None
         
+        last_price = df['close'].iloc[-1]
+        last_volume = df['volume'].iloc[-1]
+        logger.info(f"✅ {ticker}: {len(df)} свечей | Цена: {last_price:.2f} | Объем: {last_volume:.0f}")
         return df
         
-    except:
+    except Exception as e:
+        logger.error(f"❌ {ticker}: Ошибка обработки данных - {e}")
         return None
 
 
 async def get_orderbook(session, ticker):
-    """Получение стакана - тихо, без ошибок в логах"""
+    """Получение стакана - тихо, без ошибок"""
     
     urls = [
         f"{BASE_URL}/{ticker}/orderbook.json",
@@ -163,6 +178,7 @@ async def get_orderbook(session, ticker):
                 ask_vol = sum(a[1] for a in asks if len(a) > 1) if asks else 0
                 
                 if bid_vol > 0 or ask_vol > 0:
+                    logger.debug(f"📖 {ticker}: Стакан BID={bid_vol:.0f} ASK={ask_vol:.0f}")
                     return bid_vol, ask_vol
                     
         except:
@@ -199,10 +215,12 @@ def detect_liquidity_grab(df):
     
     # Медвежий захват
     if prev["high"] > high_lvl and last["close"] < prev["high"]:
+        logger.debug(f"🔴 Обнаружен SHORT захват ликвидности")
         return "SHORT"
     
     # Бычий захват
     if prev["low"] < low_lvl and last["close"] > prev["low"]:
+        logger.debug(f"🟢 Обнаружен LONG захват ликвидности")
         return "LONG"
     
     return None
@@ -249,10 +267,12 @@ def find_fair_value_gap(df):
     
     # Бычий FVG
     if c1["high"] < c3["low"]:
+        logger.debug(f"🟢 Найден бычий FVG")
         return (float(c1["high"]), float(c3["low"]))
     
     # Медвежий FVG
     if c1["low"] > c3["high"]:
+        logger.debug(f"🔴 Найден медвежий FVG")
         return (float(c3["high"]), float(c1["low"]))
     
     return None
@@ -286,7 +306,7 @@ def analyze_orderbook_bias(bid_vol, ask_vol):
 # ================= SIGNAL GENERATION =================
 
 def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
-    """Генерация торгового сигнала"""
+    """Генерация торгового сигнала с детальным логированием"""
     if df is None or len(df) < 50:
         return None
     
@@ -295,26 +315,39 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
     if not side:
         return None
     
+    logger.info(f"🔍 {ticker}: Шаг 1 пройден - захват ликвидности {side}")
+    
     # Шаг 2: Расширенное движение
     if not check_displacement(df):
+        logger.debug(f"❌ {ticker}: Нет displacement")
         return None
+    
+    logger.info(f"🔍 {ticker}: Шаг 2 пройден - есть displacement")
     
     # Шаг 3: Всплеск объема
     if not check_volume_spike(df):
+        logger.debug(f"❌ {ticker}: Нет всплеска объема")
         return None
+    
+    logger.info(f"🔍 {ticker}: Шаг 3 пройден - всплеск объема")
     
     # Шаг 4: Fair Value Gap
     fvg = find_fair_value_gap(df)
     if not fvg:
+        logger.debug(f"❌ {ticker}: Нет FVG")
         return None
+    
+    logger.info(f"🔍 {ticker}: Шаг 4 пройден - найден FVG {fvg}")
     
     # Шаг 5: Анализ стакана
     ob_bias = analyze_orderbook_bias(bid_vol, ask_vol)
     
     if ob_bias != "NO_DATA":
         if side == "LONG" and ob_bias in ["SELL", "STRONG_SELL"]:
+            logger.info(f"❌ {ticker}: LONG отвергнут стаканом ({ob_bias})")
             return None
         if side == "SHORT" and ob_bias in ["BUY", "STRONG_BUY"]:
+            logger.info(f"❌ {ticker}: SHORT отвергнут стаканом ({ob_bias})")
             return None
     
     # Фильтр близости к FVG
@@ -329,7 +362,10 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
             price_in_range = True
     
     if not price_in_range:
+        logger.info(f"❌ {ticker}: Цена {current_price:.2f} далеко от FVG {fvg}")
         return None
+    
+    logger.info(f"🎯 {ticker}: ВСЕ ШАГИ ПРОЙДЕНЫ! Сигнал {side}")
     
     return {
         "side": side,
@@ -399,7 +435,7 @@ async def send_telegram_signal(ticker, signal, bot):
         for k in old_keys:
             del last_signals[k]
         
-        logger.info(f"📤 Signal sent: {ticker} {signal['side']}")
+        logger.info(f"📤 СИГНАЛ ОТПРАВЛЕН: {ticker} {signal['side']}")
         
     except TelegramError as e:
         logger.error(f"Telegram error: {e}")
@@ -447,7 +483,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔄 Циклов: {total_cycles}\n"
         f"📤 Сигналов: {signals_found}\n"
         f"📈 Тикеров: {len(TICKERS)}\n"
-        f"⏱ Интервал: {INTERVAL} мин\n\n"
+        f"⏱ Интервал: {INTERVAL} мин\n"
+        f"✅ С данными: {ticks_with_data}\n"
+        f"❌ Без данных: {ticks_without_data}\n\n"
         f"<i>Сканирование каждые {INTERVAL} мин</i>"
     )
     await update.message.reply_text(text, parse_mode='HTML')
@@ -458,8 +496,7 @@ async def tickers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tickers_list = "\n".join([f"• {t}" for t in TICKERS])
     text = (
         f"📊 <b>Отслеживаемые тикеры ({len(TICKERS)}):</b>\n\n"
-        f"{tickers_list}\n\n"
-        f"<i>Для изменения отправьте /add TICKER или /remove TICKER</i>"
+        f"{tickers_list}"
     )
     await update.message.reply_text(text, parse_mode='HTML')
 
@@ -517,11 +554,16 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN PROCESSING =================
 
 async def process_ticker(session, ticker, bot):
-    """Обработка одного тикера"""
+    """Обработка одного тикера с диагностикой"""
+    global ticks_with_data, ticks_without_data
+    
     try:
         df = await get_candles(session, ticker)
         if df is None:
+            ticks_without_data += 1
             return
+        
+        ticks_with_data += 1
         
         bid_vol, ask_vol = await get_orderbook(session, ticker)
         
@@ -530,8 +572,8 @@ async def process_ticker(session, ticker, bot):
         if signal:
             await send_telegram_signal(ticker, signal, bot)
             
-    except:
-        pass  # Тихая обработка ошибок
+    except Exception as e:
+        logger.error(f"❌ {ticker}: Ошибка - {e}")
 
 
 async def health_check(bot):
@@ -593,21 +635,22 @@ async def main_loop():
                 seconds_to_next = (INTERVAL * 60) - (now % (INTERVAL * 60))
                 wait_time = max(seconds_to_next + 1, 1)
                 
-                logger.info(f"⏳ Cycle #{total_cycles}: {wait_time:.0f}s to next candle")
+                logger.info(f"⏳ Цикл #{total_cycles}: ожидание {wait_time:.0f}с до следующей свечи")
                 await asyncio.sleep(wait_time)
                 
-                logger.info(f"🔄 Cycle #{total_cycles}: Processing...")
+                logger.info(f"🔄 Цикл #{total_cycles}: сканирование {len(TICKERS)} тикеров...")
                 
                 tasks = [process_ticker(session, ticker, bot) for ticker in TICKERS]
                 await asyncio.gather(*tasks, return_exceptions=True)
                 
-                logger.info(f"✅ Cycle #{total_cycles}: Done")
+                logger.info(f"✅ Цикл #{total_cycles}: завершен (данных: {ticks_with_data}, без данных: {ticks_without_data})")
                 
             except asyncio.CancelledError:
                 break
             except KeyboardInterrupt:
                 break
-            except:
+            except Exception as e:
+                logger.error(f"Ошибка в главном цикле: {e}")
                 await asyncio.sleep(60)
     
     await application.stop()
@@ -618,11 +661,11 @@ async def main_loop():
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        logger.info("Starting SMC Trading Bot v4.0...")
+        logger.info("Запуск SMC Trading Bot v4.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Бот остановлен пользователем")
     except Exception as e:
-        logger.critical(f"Fatal error: {e}", exc_info=True)
+        logger.critical(f"Критическая ошибка: {e}", exc_info=True)
     finally:
-        logger.info("Bot shutdown complete")
+        logger.info("Бот завершил работу")
