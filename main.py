@@ -28,15 +28,15 @@ CHAT_ID = os.getenv("CHAT_ID")
 if not TOKEN or not CHAT_ID:
     raise ValueError("TOKEN and CHAT_ID must be set in .env file")
 
-# Список тикеров для мониторинга
-TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "YNDX"]
+# Список тикеров для мониторинга (YNDX заменен на VTBR)
+TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "VTBR", "ROSN", "TATN", "NVTK", "PLZL", "SNGS"]
 
 # Настройки свечей
 INTERVAL = 1  # минут
 CANDLES = 100  # количество свечей для анализа
 
 # URL для MOEX API
-BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/securities"
+BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares"
 
 # Инициализация Telegram бота
 bot = Bot(token=TOKEN)
@@ -47,7 +47,7 @@ last_signals = {}
 # ================= MOEX API FUNCTIONS =================
 
 async def fetch_json(session, url, retries=3):
-    """Универсальная функция для получения JSON с MOEX API"""
+    """Универсальная функция для получения JSON с MOEX API с улучшенной обработкой ошибок"""
     headers = {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)'
@@ -73,9 +73,15 @@ async def fetch_json(session, url, retries=3):
                 
                 # Проверяем content-type
                 content_type = response.headers.get('content-type', '')
+                
+                # Если получили HTML вместо JSON - это не ошибка парсинга, а неверный ответ сервера
+                if 'html' in content_type.lower():
+                    logger.warning(f"Got HTML instead of JSON from {url} (service might be unavailable)")
+                    return None
+                
                 if 'json' not in content_type.lower():
                     text = await response.text()
-                    logger.warning(f"Non-JSON response (first 200 chars): {text[:200]}")
+                    logger.warning(f"Non-JSON response from {url}: {text[:200]}")
                     
                     # Проверяем на известные ошибки
                     if any(keyword in text.lower() for keyword in ['not found', 'не найдена', 'error', 'ошибка']):
@@ -89,7 +95,7 @@ async def fetch_json(session, url, retries=3):
                 try:
                     return await response.json()
                 except Exception as e:
-                    logger.error(f"JSON parse error: {e}")
+                    logger.error(f"JSON parse error for {url}: {e}")
                     if attempt < retries - 1:
                         await asyncio.sleep(1 * (attempt + 1))
                     continue
@@ -97,11 +103,11 @@ async def fetch_json(session, url, retries=3):
         except asyncio.TimeoutError:
             logger.warning(f"Timeout for {url} (attempt {attempt + 1}/{retries})")
         except aiohttp.ClientError as e:
-            logger.error(f"Client error: {e}")
+            logger.error(f"Client error for {url}: {e}")
             if attempt < retries - 1:
                 await asyncio.sleep(2 * (attempt + 1))
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error for {url}: {e}")
             if attempt < retries - 1:
                 await asyncio.sleep(1 * (attempt + 1))
     
@@ -110,7 +116,7 @@ async def fetch_json(session, url, retries=3):
 
 async def get_candles(session, ticker):
     """Получение и подготовка свечных данных"""
-    url = f"{BASE_URL}/{ticker}/candles.json?interval={INTERVAL}&limit={CANDLES}"
+    url = f"{BASE_URL}/securities/{ticker}/candles.json?interval={INTERVAL}&limit={CANDLES}"
     
     data = await fetch_json(session, url)
     if not data:
@@ -150,36 +156,51 @@ async def get_candles(session, ticker):
 
 
 async def get_orderbook(session, ticker):
-    """Получение данных стакана заявок"""
-    url = f"{BASE_URL}/{ticker}/orderbook.json"
+    """Получение данных стакана заявок с правильной обработкой ошибок и разными URL"""
     
-    data = await fetch_json(session, url)
-    if not data:
-        return None, None
+    # Пробуем разные варианты URL для стакана
+    urls = [
+        f"{BASE_URL}/boards/TQBR/securities/{ticker}/orderbook.json",
+        f"{BASE_URL}/securities/{ticker}/orderbook.json",
+        f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{ticker}/orderbook.json",
+        f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/orderbook.json"
+    ]
     
-    try:
-        orderbook_data = data.get("orderbook", {}).get("data", [])
-        
-        if not orderbook_data or not orderbook_data[0]:
-            logger.debug(f"Empty orderbook data for {ticker}")
-            return None, None
-        
-        # Извлекаем bids и asks
-        row = orderbook_data[0]
-        
-        bids = row[2] if len(row) > 2 and row[2] else []
-        asks = row[3] if len(row) > 3 and row[3] else []
-        
-        # Считаем объемы
-        bid_vol = sum(b[1] for b in bids if len(b) > 1) if bids else 0
-        ask_vol = sum(a[1] for a in asks if len(a) > 1) if asks else 0
-        
-        logger.debug(f"Orderbook for {ticker}: BID={bid_vol:.0f}, ASK={ask_vol:.0f}")
-        return bid_vol, ask_vol
-        
-    except Exception as e:
-        logger.error(f"Error processing orderbook for {ticker}: {e}")
-        return None, None
+    for url in urls:
+        try:
+            data = await fetch_json(session, url)
+            
+            if not data:
+                continue
+            
+            orderbook_data = data.get("orderbook", {}).get("data", [])
+            
+            if not orderbook_data or not orderbook_data[0]:
+                logger.debug(f"Empty orderbook data from {url}")
+                continue
+            
+            # Извлекаем bids и asks
+            row = orderbook_data[0]
+            
+            # Структура данных в ISS: [timestamp, bids, asks, ...]
+            bids = row[2] if len(row) > 2 and row[2] else []
+            asks = row[3] if len(row) > 3 and row[3] else []
+            
+            # Считаем объемы
+            bid_vol = sum(b[1] for b in bids if len(b) > 1) if bids else 0
+            ask_vol = sum(a[1] for a in asks if len(a) > 1) if asks else 0
+            
+            if bid_vol > 0 or ask_vol > 0:
+                logger.debug(f"Orderbook for {ticker}: BID={bid_vol:.0f}, ASK={ask_vol:.0f} (from {url})")
+                return bid_vol, ask_vol
+            
+        except Exception as e:
+            logger.debug(f"Failed to get orderbook from {url}: {e}")
+            continue
+    
+    # Если все попытки неудачны - возвращаем None без ошибки
+    logger.debug(f"No orderbook data available for {ticker} (market may be closed or data unavailable)")
+    return None, None
 
 
 # ================= TECHNICAL ANALYSIS =================
@@ -281,10 +302,13 @@ def find_fair_value_gap(df):
 def analyze_orderbook_bias(bid_vol, ask_vol):
     """Анализ смещения в стакане"""
     if bid_vol is None or ask_vol is None:
-        return "NEUTRAL"
+        return "NO_DATA"  # Возвращаем специальный статус вместо NEUTRAL
     
     if ask_vol == 0:
-        return "BUY" if bid_vol > 0 else "NEUTRAL"
+        return "STRONG_BUY" if bid_vol > 0 else "NO_DATA"
+    
+    if bid_vol == 0:
+        return "STRONG_SELL" if ask_vol > 0 else "NO_DATA"
     
     ratio = bid_vol / ask_vol
     
@@ -305,51 +329,57 @@ def analyze_orderbook_bias(bid_vol, ask_vol):
 def generate_trading_signal(df, bid_vol, ask_vol):
     """Генерация торгового сигнала на основе всех факторов"""
     if df is None or len(df) < 50:
+        logger.debug("Insufficient data for signal generation")
         return None
     
     # Шаг 1: Захват ликвидности
     side = detect_liquidity_grab(df)
     if not side:
+        logger.debug("No liquidity grab detected")
         return None
     
     # Шаг 2: Расширенное движение
     if not check_displacement(df):
-        logger.debug(f"No displacement for signal")
+        logger.debug(f"No displacement for {side} signal")
         return None
     
     # Шаг 3: Всплеск объема
     if not check_volume_spike(df):
-        logger.debug(f"No volume spike for signal")
+        logger.debug(f"No volume spike for {side} signal")
         return None
     
     # Шаг 4: Fair Value Gap
     fvg = find_fair_value_gap(df)
     if not fvg:
-        logger.debug(f"No FVG found")
+        logger.debug(f"No FVG found for {side} signal")
         return None
     
-    # Шаг 5: Анализ стакана
+    # Шаг 5: Анализ стакана (если данные доступны)
     ob_bias = analyze_orderbook_bias(bid_vol, ask_vol)
     
     # Проверка соответствия направления сигнала и стакана
-    if side == "LONG" and ob_bias in ["SELL", "STRONG_SELL"]:
-        logger.debug(f"LONG signal rejected by orderbook bias: {ob_bias}")
-        return None
-    
-    if side == "SHORT" and ob_bias in ["BUY", "STRONG_BUY"]:
-        logger.debug(f"SHORT signal rejected by orderbook bias: {ob_bias}")
-        return None
+    # Если данных о стакане нет (NO_DATA) - пропускаем проверку
+    if ob_bias != "NO_DATA":
+        if side == "LONG" and ob_bias in ["SELL", "STRONG_SELL"]:
+            logger.debug(f"LONG signal rejected by orderbook bias: {ob_bias}")
+            return None
+        
+        if side == "SHORT" and ob_bias in ["BUY", "STRONG_BUY"]:
+            logger.debug(f"SHORT signal rejected by orderbook bias: {ob_bias}")
+            return None
+    else:
+        logger.debug(f"No orderbook data, skipping orderbook bias check")
     
     # Дополнительный фильтр: близость цены к FVG
     current_price = df.iloc[-1]["close"]
     fvg_low, fvg_high = min(fvg), max(fvg)
     
-    # Проверяем, что цена находится в пределах 1% от FVG
+    # Проверяем, что цена находится в пределах 2% от FVG (увеличили с 1% для большей гибкости)
     price_in_range = False
     if fvg_low > 0:
         dist_to_low = abs(current_price - fvg_low) / fvg_low
         dist_to_high = abs(current_price - fvg_high) / fvg_high
-        if dist_to_low < 0.01 or dist_to_high < 0.01:
+        if dist_to_low < 0.02 or dist_to_high < 0.02:
             price_in_range = True
     
     if not price_in_range:
@@ -361,14 +391,14 @@ def generate_trading_signal(df, bid_vol, ask_vol):
         "side": side,
         "price": float(current_price),
         "fvg": fvg,
-        "bias": ob_bias,
+        "bias": ob_bias if ob_bias != "NO_DATA" else "N/A",
         "bid_vol": bid_vol if bid_vol else 0,
         "ask_vol": ask_vol if ask_vol else 0,
-        "volume_ratio": (bid_vol / ask_vol) if ask_vol and ask_vol > 0 else 0,
+        "volume_ratio": (bid_vol / ask_vol) if (ask_vol and ask_vol > 0) else 0,
         "timestamp": pd.Timestamp.now()
     }
     
-    logger.info(f"Signal generated for {side}: price={signal['price']:.2f}")
+    logger.info(f"✅ Signal generated: {side} at price={signal['price']:.2f}, FVG={fvg}")
     return signal
 
 
@@ -433,12 +463,11 @@ async def send_telegram_signal(ticker, signal):
         
         # Очищаем старые сигналы (старше 1 часа)
         current_time = time.time()
-        last_signals.update({
-            k: v for k, v in last_signals.items() 
-            if current_time - v < 3600
-        })
+        old_keys = [k for k, v in last_signals.items() if current_time - v > 3600]
+        for k in old_keys:
+            del last_signals[k]
         
-        logger.info(f"Signal sent to Telegram: {ticker} {signal['side']}")
+        logger.info(f"📤 Signal sent to Telegram: {ticker} {signal['side']}")
         
     except TelegramError as e:
         logger.error(f"Telegram error: {e}")
@@ -456,6 +485,7 @@ async def process_ticker(session, ticker):
         # Получаем данные
         df = await get_candles(session, ticker)
         if df is None:
+            logger.debug(f"{ticker}: No candle data")
             return
         
         bid_vol, ask_vol = await get_orderbook(session, ticker)
@@ -475,11 +505,13 @@ async def process_ticker(session, ticker):
 async def health_check():
     """Проверка работоспособности бота"""
     try:
+        tickers_str = ", ".join(TICKERS[:5]) + ("..." if len(TICKERS) > 5 else "")
         await bot.send_message(
             chat_id=CHAT_ID,
             text="✅ Бот запущен и мониторит рынок\n"
-                 f"📊 Тикеры: {', '.join(TICKERS)}\n"
-                 f"⏱ Интервал: {INTERVAL} мин"
+                 f"📊 Тикеры ({len(TICKERS)}): {tickers_str}\n"
+                 f"⏱ Интервал: {INTERVAL} мин\n"
+                 f"🔧 Orderbook: авто-восстановление"
         )
         logger.info("Health check message sent")
     except Exception as e:
@@ -508,7 +540,11 @@ async def main_loop():
         timeout=timeout
     ) as session:
         
-        logger.info("Trading bot started")
+        logger.info("=" * 50)
+        logger.info("🚀 Trading bot starting...")
+        logger.info(f"📊 Monitoring {len(TICKERS)} tickers: {', '.join(TICKERS)}")
+        logger.info(f"⏱ Interval: {INTERVAL} min")
+        logger.info("=" * 50)
         
         # Отправляем сообщение о запуске
         await health_check()
@@ -523,8 +559,10 @@ async def main_loop():
                 # Добавляем 1 секунду для надежности
                 wait_time = max(seconds_to_next_candle + 1, 1)
                 
-                logger.info(f"Waiting {wait_time:.0f} seconds until next candle close")
+                logger.info(f"⏳ Waiting {wait_time:.0f}s until next candle close...")
                 await asyncio.sleep(wait_time)
+                
+                logger.info(f"🔄 Processing all tickers...")
                 
                 # Обрабатываем все тикеры параллельно
                 tasks = [process_ticker(session, ticker) for ticker in TICKERS]
