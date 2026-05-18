@@ -53,7 +53,11 @@ async def fetch_json(session, url, retries=3):
         try:
             async with session.get(url) as response:
                 if response.status == 200:
-                    return await response.json()
+                    try:
+                        return await response.json()
+                    except Exception as e:
+                        logger.warning(f"JSON parse error for {url}: {e}")
+                        return None
                 else:
                     logger.warning(f"HTTP {response.status} for {url}")
         except asyncio.TimeoutError:
@@ -74,7 +78,7 @@ async def get_candles(session, ticker):
     
     # Используем тот же формат URL, что и в первом боте
     till = datetime.now().strftime('%Y-%m-%d')
-    frm = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')  # За 1 день для минутных свечей
+    frm = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')  # За 2 дня для минутных свечей
     
     url = (f"{BASE_URL}/{ticker}/candles.json"
            f"?from={frm}&till={till}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
@@ -117,7 +121,7 @@ async def get_candles(session, ticker):
             logger.warning(f"Insufficient data for {ticker}: {len(df)} candles")
             return None
         
-        logger.debug(f"Got {len(df)} candles for {ticker}")
+        logger.debug(f"✅ Got {len(df)} candles for {ticker}")
         return df
         
     except Exception as e:
@@ -126,38 +130,51 @@ async def get_candles(session, ticker):
 
 
 async def get_orderbook(session, ticker):
-    """Получение данных стакана заявок (с правильным URL как в первом боте)"""
+    """Получение данных стакана заявок с правильными URL и обработкой ошибок"""
     
-    url = f"{BASE_URL}/{ticker}/orderbook.json"
+    # Список URL для попыток (основной с boards/TQBR и запасной)
+    urls = [
+        f"{BASE_URL}/{ticker}/orderbook.json",  # Основной URL с boards/TQBR
+        f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/orderbook.json"  # Запасной
+    ]
     
-    data = await fetch_json(session, url)
-    if not data or 'orderbook' not in data:
-        logger.debug(f"No orderbook data for {ticker}")
-        return None, None
+    for url in urls:
+        try:
+            data = await fetch_json(session, url)
+            if not data or 'orderbook' not in data:
+                continue
+            
+            orderbook_data = data['orderbook']['data']
+            
+            if not orderbook_data or not orderbook_data[0]:
+                continue
+            
+            row = orderbook_data[0]
+            
+            # Структура: row[0] - timestamp, row[1] - bid/ask count, row[2] - bids, row[3] - asks
+            bids = []
+            asks = []
+            
+            if len(row) > 2 and row[2]:
+                bids = row[2]
+            if len(row) > 3 and row[3]:
+                asks = row[3]
+            
+            # Считаем объемы (bid/ask структура: [[price, volume], [price, volume], ...])
+            bid_vol = sum(b[1] for b in bids if len(b) > 1) if bids else 0
+            ask_vol = sum(a[1] for a in asks if len(a) > 1) if asks else 0
+            
+            if bid_vol > 0 or ask_vol > 0:
+                logger.debug(f"✅ Orderbook for {ticker}: BID={bid_vol:.0f}, ASK={ask_vol:.0f}")
+                return bid_vol, ask_vol
+                
+        except Exception as e:
+            logger.debug(f"Failed to get orderbook from {url}: {e}")
+            continue
     
-    try:
-        orderbook_data = data['orderbook']['data']
-        
-        if not orderbook_data or not orderbook_data[0]:
-            logger.debug(f"Empty orderbook data for {ticker}")
-            return None, None
-        
-        # Извлекаем bids и asks
-        row = orderbook_data[0]
-        
-        bids = row[2] if len(row) > 2 and row[2] else []
-        asks = row[3] if len(row) > 3 and row[3] else []
-        
-        # Считаем объемы
-        bid_vol = sum(b[1] for b in bids if len(b) > 1) if bids else 0
-        ask_vol = sum(a[1] for a in asks if len(a) > 1) if asks else 0
-        
-        logger.debug(f"Orderbook for {ticker}: BID={bid_vol:.0f}, ASK={ask_vol:.0f}")
-        return bid_vol, ask_vol
-        
-    except Exception as e:
-        logger.error(f"Error processing orderbook for {ticker}: {e}")
-        return None, None
+    # Если стакан недоступен - это нормально для нерабочего времени
+    logger.debug(f"ℹ️ No orderbook data available for {ticker} (market may be closed)")
+    return None, None
 
 
 # ================= TECHNICAL ANALYSIS =================
@@ -188,12 +205,12 @@ def detect_liquidity_grab(df):
     
     # Медвежий захват (пробой максимума и возврат)
     if prev["high"] > high_lvl and last["close"] < prev["high"]:
-        logger.debug(f"Liquidity grab detected: SHORT at {last['close']:.2f}")
+        logger.debug(f"🔴 Liquidity grab detected: SHORT at {last['close']:.2f}")
         return "SHORT"
     
     # Бычий захват (пробой минимума и возврат)
     if prev["low"] < low_lvl and last["close"] > prev["low"]:
-        logger.debug(f"Liquidity grab detected: LONG at {last['close']:.2f}")
+        logger.debug(f"🟢 Liquidity grab detected: LONG at {last['close']:.2f}")
         return "LONG"
     
     return None
@@ -215,7 +232,7 @@ def check_displacement(df, multiplier=1.5):
     
     result = body > avg_body * multiplier
     if result:
-        logger.debug(f"Displacement detected: body={body:.2f}, avg={avg_body:.2f}")
+        logger.debug(f"📏 Displacement detected: body={body:.2f}, avg={avg_body:.2f}")
     
     return result
 
@@ -235,7 +252,7 @@ def check_volume_spike(df, multiplier=1.5):
     
     result = last_vol > avg_vol * multiplier
     if result:
-        logger.debug(f"Volume spike detected: vol={last_vol:.0f}, avg={avg_vol:.0f}")
+        logger.debug(f"📊 Volume spike detected: vol={last_vol:.0f}, avg={avg_vol:.0f}")
     
     return result
 
@@ -252,13 +269,13 @@ def find_fair_value_gap(df):
     # Бычий FVG (разрыв вверх)
     if c1["high"] < c3["low"]:
         fvg = (float(c1["high"]), float(c3["low"]))
-        logger.debug(f"Bullish FVG found: {fvg}")
+        logger.debug(f"🟢 Bullish FVG found: {fvg}")
         return fvg
     
     # Медвежий FVG (разрыв вниз)
     if c1["low"] > c3["high"]:
         fvg = (float(c3["high"]), float(c1["low"]))
-        logger.debug(f"Bearish FVG found: {fvg}")
+        logger.debug(f"🔴 Bearish FVG found: {fvg}")
         return fvg
     
     return None
@@ -266,7 +283,7 @@ def find_fair_value_gap(df):
 
 def analyze_orderbook_bias(bid_vol, ask_vol):
     """Анализ смещения в стакане"""
-    if bid_vol is None or ask_vol is None:
+    if bid_vol is None or ask_vol is None or (bid_vol == 0 and ask_vol == 0):
         return "NO_DATA"
     
     if ask_vol == 0:
@@ -291,29 +308,32 @@ def analyze_orderbook_bias(bid_vol, ask_vol):
 
 # ================= SIGNAL GENERATION =================
 
-def generate_trading_signal(df, bid_vol, ask_vol):
+def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
     """Генерация торгового сигнала на основе всех факторов"""
     if df is None or len(df) < 50:
+        logger.debug(f"{ticker}: Insufficient data ({len(df) if df is not None else 0} candles)")
         return None
-    
-    logger.debug(f"Analyzing signal for data with {len(df)} candles")
     
     # Шаг 1: Захват ликвидности
     side = detect_liquidity_grab(df)
     if not side:
+        logger.debug(f"{ticker}: No liquidity grab")
         return None
     
     # Шаг 2: Расширенное движение
     if not check_displacement(df):
+        logger.debug(f"{ticker}: No displacement")
         return None
     
     # Шаг 3: Всплеск объема
     if not check_volume_spike(df):
+        logger.debug(f"{ticker}: No volume spike")
         return None
     
     # Шаг 4: Fair Value Gap
     fvg = find_fair_value_gap(df)
     if not fvg:
+        logger.debug(f"{ticker}: No FVG")
         return None
     
     # Шаг 5: Анализ стакана (если данные доступны)
@@ -322,11 +342,11 @@ def generate_trading_signal(df, bid_vol, ask_vol):
     # Проверка соответствия направления сигнала и стакана
     if ob_bias != "NO_DATA":
         if side == "LONG" and ob_bias in ["SELL", "STRONG_SELL"]:
-            logger.debug(f"LONG signal rejected by orderbook bias: {ob_bias}")
+            logger.debug(f"{ticker}: LONG rejected - orderbook shows {ob_bias}")
             return None
         
         if side == "SHORT" and ob_bias in ["BUY", "STRONG_BUY"]:
-            logger.debug(f"SHORT signal rejected by orderbook bias: {ob_bias}")
+            logger.debug(f"{ticker}: SHORT rejected - orderbook shows {ob_bias}")
             return None
     
     # Дополнительный фильтр: близость цены к FVG
@@ -342,7 +362,7 @@ def generate_trading_signal(df, bid_vol, ask_vol):
             price_in_range = True
     
     if not price_in_range:
-        logger.debug(f"Price {current_price:.2f} too far from FVG: {fvg}")
+        logger.debug(f"{ticker}: Price {current_price:.2f} too far from FVG {fvg}")
         return None
     
     # Формируем сигнал
@@ -357,7 +377,7 @@ def generate_trading_signal(df, bid_vol, ask_vol):
         "timestamp": pd.Timestamp.now()
     }
     
-    logger.info(f"✅ SIGNAL: {side} {signal['price']:.2f} FVG:{fvg}")
+    logger.info(f"✅ SIGNAL FOUND: {ticker} {side} at {signal['price']:.2f}, FVG: {fvg}")
     return signal
 
 
@@ -439,21 +459,24 @@ async def send_telegram_signal(ticker, signal):
 async def process_ticker(session, ticker):
     """Обработка одного тикера"""
     try:
-        logger.debug(f"Processing {ticker}...")
+        logger.debug(f"🔍 Processing {ticker}...")
         
-        # Получаем данные
+        # Получаем данные свечей
         df = await get_candles(session, ticker)
         if df is None:
-            logger.debug(f"{ticker}: No candle data")
+            logger.debug(f"❌ {ticker}: No candle data")
             return
         
+        # Получаем данные стакана
         bid_vol, ask_vol = await get_orderbook(session, ticker)
         
         # Генерируем сигнал
-        signal = generate_trading_signal(df, bid_vol, ask_vol)
+        signal = generate_trading_signal(df, bid_vol, ask_vol, ticker)
         
         if signal:
             await send_telegram_signal(ticker, signal)
+        else:
+            logger.debug(f"❌ {ticker}: No signal generated")
             
     except Exception as e:
         logger.error(f"Error processing {ticker}: {e}", exc_info=True)
@@ -468,7 +491,8 @@ async def health_check():
             text="✅ Бот запущен и мониторит рынок\n"
                  f"📊 Тикеры ({len(TICKERS)}): {tickers_str}\n"
                  f"⏱ Интервал: {INTERVAL} мин\n"
-                 f"🔧 API: MOEX ISS (как в первом боте)"
+                 f"🔧 API: MOEX ISS (boards/TQBR)\n"
+                 f"📈 Стратегия: SMC (Liquidity Grab + FVG)"
         )
         logger.info("Health check message sent")
     except Exception as e:
@@ -482,33 +506,44 @@ async def main_loop():
     
     async with aiohttp.ClientSession(timeout=timeout) as session:
         
-        logger.info("=" * 50)
-        logger.info("🚀 SMC Trading Bot v2.0 (Fixed API)")
+        logger.info("=" * 60)
+        logger.info("🚀 SMC Trading Bot v3.0 (Fixed API)")
         logger.info(f"📊 Monitoring {len(TICKERS)} tickers: {', '.join(TICKERS)}")
         logger.info(f"⏱ Interval: {INTERVAL} min")
-        logger.info("=" * 50)
+        logger.info(f"🔗 Base URL: {BASE_URL}")
+        logger.info("=" * 60)
         
         # Отправляем сообщение о запуске
         await health_check()
         
+        # Счетчик циклов
+        cycle = 0
+        
         # Основной цикл
         while True:
             try:
+                cycle += 1
+                
                 # Синхронизация с закрытием свечи
                 now = time.time()
                 seconds_to_next_candle = (INTERVAL * 60) - (now % (INTERVAL * 60))
                 wait_time = max(seconds_to_next_candle + 1, 1)
                 
-                logger.info(f"⏳ Waiting {wait_time:.0f}s until next candle...")
+                logger.info(f"⏳ Cycle #{cycle}: Waiting {wait_time:.0f}s until next candle...")
                 await asyncio.sleep(wait_time)
                 
-                logger.info(f"🔄 Processing all tickers...")
+                logger.info(f"🔄 Cycle #{cycle}: Processing all tickers...")
                 
                 # Обрабатываем все тикеры параллельно
                 tasks = [process_ticker(session, ticker) for ticker in TICKERS]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                logger.debug("All tickers processed")
+                # Логируем ошибки
+                for ticker, result in zip(TICKERS, results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Task for {ticker} failed: {result}")
+                
+                logger.info(f"✅ Cycle #{cycle}: All tickers processed")
                 
             except asyncio.CancelledError:
                 logger.info("Bot cancelled")
@@ -525,7 +560,7 @@ async def main_loop():
 
 if __name__ == "__main__":
     try:
-        logger.info("Starting SMC Trading Bot...")
+        logger.info("Starting SMC Trading Bot v3.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
