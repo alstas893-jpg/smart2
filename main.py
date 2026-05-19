@@ -76,19 +76,20 @@ async def fetch_json(session, url):
 
 
 async def get_candles(session, ticker):
-    """Получение ТОЛЬКО сегодняшних свечей с проверкой даты"""
-    
     msk_now = get_msk_time()
-    today_str = msk_now.strftime('%Y-%m-%d')
     
-    # Запрашиваем данные за сегодня
+    # Запрашиваем только последние ~2 часа вместо всего дня
+    from_dt = msk_now - timedelta(hours=2)
+    from_str = from_dt.strftime('%Y-%m-%d %H:%M:%S')
+    till_str = msk_now.strftime('%Y-%m-%d %H:%M:%S')
+    
     url = (f"{BASE_URL}/{ticker}/candles.json"
-           f"?from={today_str}&till={today_str}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
+           f"?from={from_str}&till={till_str}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
     
     data = await fetch_json(session, url)
     
     if not data or 'candles' not in data:
-        logger.warning(f"❌ {ticker}: Нет данных за сегодня")
+        logger.warning(f"❌ {ticker}: Нет данных")
         return None
     
     rows = data['candles']['data']
@@ -98,10 +99,8 @@ async def get_candles(session, ticker):
         logger.warning(f"❌ {ticker}: Пустой массив")
         return None
     
-    # Создаем DataFrame
     df = pd.DataFrame(rows, columns=cols)
     
-    # Используем end (время закрытия свечи)
     if 'end' in df.columns:
         df = df.rename(columns={'end': 'date'})
     elif 'begin' in df.columns:
@@ -119,52 +118,39 @@ async def get_candles(session, ticker):
     
     df = df[available].copy()
     
-    # Конвертируем время: UTC -> МСК (+3 часа)
+    # API возвращает время уже в МСК — НЕ прибавляем +3
     df['date'] = pd.to_datetime(df['date'])
     
     for c in available:
         if c != 'date':
             df[c] = pd.to_numeric(df[c], errors='coerce')
     
-    df = df.dropna()
-    df = df.sort_values('date')
+    df = df.dropna().sort_values('date').reset_index(drop=True)
     
-    # ПРОВЕРЯЕМ ДАТУ: оставляем только сегодняшние свечи
-    today_date = msk_now.date()
-    df['date_only'] = df['date'].dt.date
-    df_today = df[df['date_only'] == today_date].copy()
-    df_today = df_today.drop(columns=['date_only'])
-    
-    if len(df_today) == 0:
-        # Показываем какие даты есть в данных
-        unique_dates = df['date'].dt.date.unique()
-        logger.warning(f"❌ {ticker}: Нет свечей за сегодня ({today_str}). Даты в данных: {unique_dates}")
+    if len(df) < 5:
+        logger.warning(f"❌ {ticker}: Мало свечей ({len(df)})")
         return None
     
-    # Берем последние CANDLES свечей
-    df_today = df_today.tail(CANDLES)
+    last_price = df['close'].iloc[-1]
+    last_volume = df['volume'].iloc[-1]
+    first_time = df['date'].iloc[0]
+    last_time = df['date'].iloc[-1]
     
-    if len(df_today) < 20:
-        logger.warning(f"❌ {ticker}: Мало свечей за сегодня ({len(df_today)})")
-        return None
-    
-    last_price = df_today['close'].iloc[-1]
-    last_volume = df_today['volume'].iloc[-1]
-    first_time = df_today['date'].iloc[0]
-    last_time = df_today['date'].iloc[-1]
-    
-    # Вычисляем отставание последней свечи от текущего времени
     msk_now_naive = msk_now.replace(tzinfo=None)
     time_diff = (msk_now_naive - last_time).total_seconds() / 60
     
-    # Проверяем, не будущее ли время
-    if time_diff < 0:
-        logger.warning(f"⚠️ {ticker}: Время последней свечи ({last_time.strftime('%H:%M:%S')}) в будущем! Пропускаем.")
+    # Отсеиваем если последняя свеча старше 5 минут
+    if time_diff > 5:
+        logger.warning(f"⚠️ {ticker}: Данные устарели ({time_diff:.0f} мин), пропускаем")
         return None
     
-    logger.info(f"✅ {ticker}: {len(df_today)} св. | {first_time.strftime('%H:%M')}→{last_time.strftime('%H:%M')} МСК | Цена: {last_price:.2f} | Объем: {last_volume:.0f} | Отставание: {time_diff:.0f}мин")
-    return df_today
-
+    if time_diff < 0:
+        logger.warning(f"⚠️ {ticker}: Время в будущем, пропускаем")
+        return None
+    
+    logger.info(f"✅ {ticker}: {len(df)} св. | {first_time.strftime('%H:%M')}→{last_time.strftime('%H:%M')} МСК | "
+                f"Цена: {last_price:.2f} | Объем: {last_volume:.0f} | Отставание: {time_diff:.0f}мин")
+    return df
 
 async def get_orderbook(session, ticker):
     """Получение стакана"""
