@@ -457,12 +457,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱ Интервал: {INTERVAL} мин\n"
         f"🎯 Множители: 1.2x\n"
         f"📅 Фильтр: строго сегодня\n\n"
-        f"📊 <b>Команды:</b>\n"
-        f"/status - статистика\n"
-        f"/test - анализ отказов\n"
-        f"/tickers - тикеры\n"
-        f"/signals - сигналы\n"
-        f"/help - справка",
+        f"📋 <b>Команды</b>\n"
+        f"▪️ /status - статистика\n"
+        f"▪️ /test - анализ отказов\n"
+        f"▪️ /tickers - список тикеров\n"
+        f"▪️ /signals - сигналы за час\n"
+        f"▪️ /help - справка",
         parse_mode='HTML'
     )
 
@@ -494,7 +494,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔄 Циклов: {total_cycles}\n"
         f"✅ С данными: {ticks_with_data}\n"
         f"❌ Без данных: {ticks_without_data}\n\n"
-        f"<b>Где отсеиваются сигналы:</b>\n"
+        f"<b>Где отсеиваются сигналы</b>\n"
         f"1️⃣ Захват ликвидности: {steps_failed['step1']}\n"
         f"2️⃣ Импульс (1.2x): {steps_failed['step2']}\n"
         f"3️⃣ Объем (1.2x): {steps_failed['step3']}\n"
@@ -508,8 +508,9 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def tickers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tickers_list = "\n".join(f"• {t}" for t in TICKERS)
     await update.message.reply_text(
-        f"📊 <b>Тикеры ({len(TICKERS)}):</b>\n" + "\n".join(f"• {t}" for t in TICKERS),
+        f"📊 <b>Тикеры ({len(TICKERS)})</b>\n\n{tickers_list}",
         parse_mode='HTML'
     )
 
@@ -520,36 +521,38 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📊 Нет сигналов за последний час")
         return
     
-    text = f"📊 <b>Сигналы за час ({len(recent)}):</b>\n\n"
+    # Без HTML для динамических данных, чтобы избежать ошибок парсинга
+    text = f"📊 Сигналы за час ({len(recent)}):\n\n"
     for key, ts in sorted(recent.items(), key=lambda x: x[1], reverse=True)[:10]:
         parts = key.split('_')
         if len(parts) >= 2:
             emoji = "🟢" if parts[1] == "LONG" else "🔴"
             time_str = datetime.fromtimestamp(ts).strftime('%H:%M')
-            text += f"{emoji} <b>{parts[0]}</b> - {parts[1]} ({time_str})\n"
+            text += f"{emoji} {parts[0]} - {parts[1]} ({time_str})\n"
     
-    await update.message.reply_text(text, parse_mode='HTML')
+    await update.message.reply_text(text)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 <b>SMC Стратегия v13.0:</b>\n\n"
+        "📚 <b>SMC Стратегия v13.0</b>\n\n"
+        "🔍 <b>Алгоритм проверки</b>\n"
         "1️⃣ Захват ликвидности (20 свечей)\n"
         "2️⃣ Импульс (1.2x среднего)\n"
         "3️⃣ Объем (1.2x среднего)\n"
         "4️⃣ Fair Value Gap (3 свечи)\n"
         "5️⃣ Анализ стакана\n"
-        "6️⃣ Близость к FVG (< 2%)\n\n"
+        "6️⃣ Близость к FVG (меньше 2%%)\n\n"
         "🕐 Время: МСК (UTC+3)\n"
         "📅 Данные: строго сегодня\n"
         "⚠️ Будущее время отсеивается\n\n"
-        "📊 <b>Команды:</b>\n"
-        "/start - запуск бота\n"
-        "/status - текущая статистика\n"
-        "/test - анализ отказов по шагам\n"
-        "/tickers - список отслеживаемых акций\n"
-        "/signals - последние сигналы за час\n"
-        "/help - эта справка",
+        "📋 <b>Команды</b>\n"
+        "▪️ /start - запуск бота\n"
+        "▪️ /status - текущая статистика\n"
+        "▪️ /test - анализ отказов\n"
+        "▪️ /tickers - список тикеров\n"
+        "▪️ /signals - сигналы за час\n"
+        "▪️ /help - справка",
         parse_mode='HTML'
     )
 
@@ -620,16 +623,16 @@ async def main_loop():
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"✅ <b>Бот v13.0 запущен!</b>\n"
+                text=f"✅ <b>Бот v13.0 запущен!</b>\n\n"
                      f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
                      f"📊 {len(TICKERS)} тикеров\n"
                      f"📅 Строго сегодняшние данные\n\n"
-                     f"📋 <b>Команды бота:</b>\n"
-                     f"/status - статистика\n"
-                     f"/test - анализ отказов\n"
-                     f"/tickers - список тикеров\n"
-                     f"/signals - сигналы за час\n"
-                     f"/help - справка",
+                     f"📋 <b>Команды бота</b>\n"
+                     f"▪️ /status - статистика\n"
+                     f"▪️ /test - анализ отказов\n"
+                     f"▪️ /tickers - список тикеров\n"
+                     f"▪️ /signals - сигналы за час\n"
+                     f"▪️ /help - справка",
                 parse_mode='HTML'
             )
         except Exception as e:
