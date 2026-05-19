@@ -140,7 +140,7 @@ async def get_candles(session, ticker):
     time_diff = (msk_now_naive - last_time).total_seconds() / 60
     
     # Отсеиваем если последняя свеча старше 5 минут
-    if time_diff > 5:
+    if time_diff > 16:
         logger.warning(f"⚠️ {ticker}: Данные устарели ({time_diff:.0f} мин), пропускаем")
         return None
     
