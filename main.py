@@ -56,6 +56,9 @@ ticks_without_data = 0
 last_status_time = time.time()
 steps_failed = {"step1": 0, "step2": 0, "step3": 0, "step4": 0, "step5": 0, "step6": 0}
 
+# Глобальная переменная для хранения application
+application = None
+
 # ================= ФУНКЦИИ ВРЕМЕНИ =================
 
 def get_msk_time():
@@ -454,11 +457,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱ Интервал: {INTERVAL} мин\n"
         f"🎯 Множители: 1.2x\n"
         f"📅 Фильтр: строго сегодня\n\n"
-        "/status - статистика\n"
-        "/test - анализ отказов\n"
-        "/tickers - тикеры\n"
-        "/signals - сигналы\n"
-        "/help - справка",
+        f"📊 <b>Команды:</b>\n"
+        f"/status - статистика\n"
+        f"/test - анализ отказов\n"
+        f"/tickers - тикеры\n"
+        f"/signals - сигналы\n"
+        f"/help - справка",
         parse_mode='HTML'
     )
 
@@ -539,7 +543,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🕐 Время: МСК (UTC+3)\n"
         "📅 Данные: строго сегодня\n"
         "⚠️ Будущее время отсеивается\n\n"
-        "/start /status /test /tickers /signals /help",
+        "📊 <b>Команды:</b>\n"
+        "/start - запуск бота\n"
+        "/status - текущая статистика\n"
+        "/test - анализ отказов по шагам\n"
+        "/tickers - список отслеживаемых акций\n"
+        "/signals - последние сигналы за час\n"
+        "/help - эта справка",
         parse_mode='HTML'
     )
 
@@ -570,12 +580,13 @@ async def process_ticker(session, ticker, bot):
 
 
 async def main_loop():
-    """Основной цикл"""
-    global total_cycles
+    """Основной цикл с polling для обработки команд"""
+    global total_cycles, application
     
+    # Создаем приложение
     application = Application.builder().token(TOKEN).build()
-    bot = application.bot
     
+    # Добавляем все обработчики команд
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CommandHandler("test", test_cmd))
@@ -583,8 +594,14 @@ async def main_loop():
     application.add_handler(CommandHandler("signals", signals_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
     
+    # Запускаем polling для приема команд
     await application.initialize()
     await application.start()
+    await application.updater.start_polling()
+    
+    logger.info("✅ Telegram polling запущен, команды будут обрабатываться")
+    
+    bot = application.bot
     
     timeout = aiohttp.ClientTimeout(total=30)
     
@@ -607,16 +624,23 @@ async def main_loop():
                      f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
                      f"📊 {len(TICKERS)} тикеров\n"
                      f"📅 Строго сегодняшние данные\n\n"
-                     "<i>/test - статистика отказов</i>",
+                     f"📋 <b>Команды бота:</b>\n"
+                     f"/status - статистика\n"
+                     f"/test - анализ отказов\n"
+                     f"/tickers - список тикеров\n"
+                     f"/signals - сигналы за час\n"
+                     f"/help - справка",
                 parse_mode='HTML'
             )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Не удалось отправить стартовое сообщение: {e}")
         
+        # Основной цикл сканирования
         while True:
             try:
                 total_cycles += 1
                 
+                # Вычисляем время до следующей минуты
                 now = time.time()
                 seconds_to_next = (INTERVAL * 60) - (now % (INTERVAL * 60))
                 wait_time = max(seconds_to_next + 1, 1)
@@ -627,11 +651,13 @@ async def main_loop():
                 msk_now = get_msk_time()
                 logger.info(f"🔄 Цикл #{total_cycles}: сканирование... ({msk_now.strftime('%H:%M:%S')} МСК)")
                 
+                # Запускаем обработку всех тикеров параллельно
                 tasks = [process_ticker(session, ticker, bot) for ticker in TICKERS]
                 await asyncio.gather(*tasks, return_exceptions=True)
                 
                 logger.info(f"✅ Цикл #{total_cycles}: данных: {ticks_with_data}, без данных: {ticks_without_data}, сигналов: {signals_found}")
                 
+                # Отправляем ежечасный отчет
                 await send_hourly_status(bot)
                 
             except asyncio.CancelledError:
@@ -642,6 +668,8 @@ async def main_loop():
                 logger.error(f"Ошибка цикла: {e}")
                 await asyncio.sleep(60)
     
+    # Останавливаем polling при завершении
+    await application.updater.stop()
     await application.stop()
 
 
@@ -651,7 +679,7 @@ if __name__ == "__main__":
         logger.info("Запуск SMC Trading Bot v13.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        logger.info("Бот остановлен")
+        logger.info("Бот остановлен пользователем")
     except Exception as e:
         logger.critical(f"Критическая ошибка: {e}", exc_info=True)
     finally:
