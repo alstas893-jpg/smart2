@@ -76,12 +76,12 @@ async def fetch_json(session, url):
 
 
 async def get_candles(session, ticker):
-    """Получение ТОЛЬКО сегодняшних свечей с правильной фильтрацией"""
+    """Получение ТОЛЬКО сегодняшних свечей с проверкой даты"""
     
     msk_now = get_msk_time()
     today_str = msk_now.strftime('%Y-%m-%d')
     
-    # Запрашиваем данные ЗА СЕГОДНЯ через даты
+    # Запрашиваем данные за сегодня
     url = (f"{BASE_URL}/{ticker}/candles.json"
            f"?from={today_str}&till={today_str}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
     
@@ -95,7 +95,7 @@ async def get_candles(session, ticker):
     cols = data['candles']['columns']
     
     if not rows:
-        logger.warning(f"❌ {ticker}: Пустой массив за сегодня")
+        logger.warning(f"❌ {ticker}: Пустой массив")
         return None
     
     # Создаем DataFrame
@@ -126,44 +126,44 @@ async def get_candles(session, ticker):
         if c != 'date':
             df[c] = pd.to_numeric(df[c], errors='coerce')
     
-    # Удаляем NaN и сортируем по времени
     df = df.dropna()
     df = df.sort_values('date')
     
-    # ФИЛЬТРУЕМ ТОЛЬКО СЕГОДНЯШНИЕ ДАННЫЕ
-    # Начало сегодняшнего дня в МСК (наивное время)
-    today_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_start_naive = today_start.replace(tzinfo=None)
+    # ПРОВЕРЯЕМ ДАТУ: оставляем только сегодняшние свечи
+    today_date = msk_now.date()
+    df['date_only'] = df['date'].dt.date
+    df_today = df[df['date_only'] == today_date].copy()
+    df_today = df_today.drop(columns=['date_only'])
     
-    # Конец сегодняшнего дня в МСК
-    today_end = msk_now.replace(hour=23, minute=59, second=59, microsecond=0)
-    today_end_naive = today_end.replace(tzinfo=None)
-    
-    # Оставляем только сегодняшние свечи
-    df = df[(df['date'] >= today_start_naive) & (df['date'] <= today_end_naive)]
-    
-    if len(df) == 0:
-        logger.warning(f"❌ {ticker}: Нет свечей за сегодня после фильтрации")
+    if len(df_today) == 0:
+        # Показываем какие даты есть в данных
+        unique_dates = df['date'].dt.date.unique()
+        logger.warning(f"❌ {ticker}: Нет свечей за сегодня ({today_str}). Даты в данных: {unique_dates}")
         return None
     
     # Берем последние CANDLES свечей
-    df = df.tail(CANDLES)
+    df_today = df_today.tail(CANDLES)
     
-    if len(df) < 20:
-        logger.warning(f"❌ {ticker}: Мало свечей ({len(df)})")
+    if len(df_today) < 20:
+        logger.warning(f"❌ {ticker}: Мало свечей за сегодня ({len(df_today)})")
         return None
     
-    last_price = df['close'].iloc[-1]
-    last_volume = df['volume'].iloc[-1]
-    first_time = df['date'].iloc[0]
-    last_time = df['date'].iloc[-1]
+    last_price = df_today['close'].iloc[-1]
+    last_volume = df_today['volume'].iloc[-1]
+    first_time = df_today['date'].iloc[0]
+    last_time = df_today['date'].iloc[-1]
     
     # Вычисляем отставание последней свечи от текущего времени
     msk_now_naive = msk_now.replace(tzinfo=None)
     time_diff = (msk_now_naive - last_time).total_seconds() / 60
     
-    logger.info(f"✅ {ticker}: {len(df)} св. | {first_time.strftime('%H:%M')}→{last_time.strftime('%H:%M')} МСК | Цена: {last_price:.2f} | Объем: {last_volume:.0f} | Отставание: {time_diff:.0f}мин")
-    return df
+    # Проверяем, не будущее ли время
+    if time_diff < 0:
+        logger.warning(f"⚠️ {ticker}: Время последней свечи ({last_time.strftime('%H:%M:%S')}) в будущем! Пропускаем.")
+        return None
+    
+    logger.info(f"✅ {ticker}: {len(df_today)} св. | {first_time.strftime('%H:%M')}→{last_time.strftime('%H:%M')} МСК | Цена: {last_price:.2f} | Объем: {last_volume:.0f} | Отставание: {time_diff:.0f}мин")
+    return df_today
 
 
 async def get_orderbook(session, ticker):
@@ -462,12 +462,12 @@ async def send_hourly_status(bot):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msk_now = get_msk_time()
     await update.message.reply_text(
-        f"🚀 <b>SMC Trading Bot v12.0</b>\n\n"
+        f"🚀 <b>SMC Trading Bot v13.0</b>\n\n"
         f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
         f"📊 Тикеров: {len(TICKERS)}\n"
         f"⏱ Интервал: {INTERVAL} мин\n"
         f"🎯 Множители: 1.2x\n"
-        f"📅 Данные: только сегодня\n\n"
+        f"📅 Фильтр: строго сегодня\n\n"
         "/status - статистика\n"
         "/test - анализ отказов\n"
         "/tickers - тикеры\n"
@@ -543,7 +543,7 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 <b>SMC Стратегия v12.0:</b>\n\n"
+        "📚 <b>SMC Стратегия v13.0:</b>\n\n"
         "1️⃣ Захват ликвидности (20 свечей)\n"
         "2️⃣ Импульс (1.2x среднего)\n"
         "3️⃣ Объем (1.2x среднего)\n"
@@ -551,7 +551,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "5️⃣ Анализ стакана\n"
         "6️⃣ Близость к FVG (< 2%)\n\n"
         "🕐 Время: МСК (UTC+3)\n"
-        "📅 Данные: только сегодня\n\n"
+        "📅 Данные: строго сегодня\n"
+        "⚠️ Будущее время отсеивается\n\n"
         "/start /status /test /tickers /signals /help",
         parse_mode='HTML'
     )
@@ -605,20 +606,21 @@ async def main_loop():
         msk_now = get_msk_time()
         
         logger.info("=" * 60)
-        logger.info(f"🚀 SMC Trading Bot v12.0 ЗАПУЩЕН | {msk_now.strftime('%H:%M:%S')} МСК")
+        logger.info(f"🚀 SMC Trading Bot v13.0 ЗАПУЩЕН | {msk_now.strftime('%H:%M:%S')} МСК")
         logger.info(f"📊 Тикеров: {len(TICKERS)}")
         logger.info(f"⏱ Интервал: {INTERVAL} мин")
         logger.info(f"🎯 Множители: 1.2x")
         logger.info(f"📅 Фильтр: только сегодня ({msk_now.strftime('%Y-%m-%d')})")
+        logger.info(f"⚠️ Будущее время отсеивается")
         logger.info("=" * 60)
         
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"✅ <b>Бот v12.0 запущен!</b>\n"
+                text=f"✅ <b>Бот v13.0 запущен!</b>\n"
                      f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
                      f"📊 {len(TICKERS)} тикеров\n"
-                     f"📅 Только сегодняшние данные\n\n"
+                     f"📅 Строго сегодняшние данные\n\n"
                      "<i>/test - статистика отказов</i>",
                 parse_mode='HTML'
             )
@@ -660,7 +662,7 @@ async def main_loop():
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        logger.info("Запуск SMC Trading Bot v12.0...")
+        logger.info("Запуск SMC Trading Bot v13.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
