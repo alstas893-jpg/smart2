@@ -59,8 +59,18 @@ steps_failed = {"step1": 0, "step2": 0, "step3": 0, "step4": 0, "step5": 0, "ste
 # ================= ФУНКЦИИ ВРЕМЕНИ =================
 
 def get_msk_time():
-    """Текущее время МСК"""
+    """Текущее время МСК (timezone-aware)"""
     return datetime.now(MSK_TZ)
+
+def to_msk_naive(dt):
+    """Конвертирует время в МСК и убирает timezone info для сравнения"""
+    if dt.tzinfo is None:
+        # Если время без timezone — считаем что это UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    # Переводим в МСК
+    msk_dt = dt.astimezone(MSK_TZ)
+    # Убираем timezone info для совместимости с pandas
+    return msk_dt.replace(tzinfo=None)
 
 # ================= MOEX API =================
 
@@ -126,6 +136,7 @@ async def get_candles(session, ticker):
     df = df[available].copy()
     
     # КОНВЕРТАЦИЯ ВРЕМЕНИ: UTC -> МСК (+3 часа)
+    # Используем наивное время (без timezone) для совместимости
     df['date'] = pd.to_datetime(df['date']) + timedelta(hours=3)
     
     for c in available:
@@ -135,8 +146,10 @@ async def get_candles(session, ticker):
     df = df.dropna().sort_values('date')
     
     # Проверка актуальности последней свечи
+    # Используем наивное время для сравнения
+    msk_now_naive = msk_now.replace(tzinfo=None)
     last_candle_time = df['date'].iloc[-1]
-    time_diff = (msk_now - last_candle_time).total_seconds() / 60
+    time_diff = (msk_now_naive - last_candle_time).total_seconds() / 60
     
     # Берем последние CANDLES свечей
     df = df.tail(CANDLES)
@@ -449,7 +462,7 @@ async def send_hourly_status(bot):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msk_now = get_msk_time()
     await update.message.reply_text(
-        f"🚀 <b>SMC Trading Bot v10.0</b>\n\n"
+        f"🚀 <b>SMC Trading Bot v11.0</b>\n\n"
         f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
         f"📊 Тикеров: {len(TICKERS)}\n"
         f"⏱ Интервал: {INTERVAL} мин\n"
@@ -529,7 +542,7 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 <b>SMC Стратегия v10.0:</b>\n\n"
+        "📚 <b>SMC Стратегия v11.0:</b>\n\n"
         "1️⃣ Захват ликвидности (20 свечей)\n"
         "2️⃣ Импульс (1.2x среднего)\n"
         "3️⃣ Объем (1.2x среднего)\n"
@@ -537,7 +550,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "5️⃣ Анализ стакана\n"
         "6️⃣ Близость к FVG (< 2%)\n\n"
         "🕐 Время: МСК (UTC+3)\n"
-        "📡 API: start=0 (актуальные данные)\n\n"
+        "📡 API: start=0\n\n"
         "/start /status /test /tickers /signals /help",
         parse_mode='HTML'
     )
@@ -591,21 +604,19 @@ async def main_loop():
         msk_now = get_msk_time()
         
         logger.info("=" * 60)
-        logger.info(f"🚀 SMC Trading Bot v10.0 ЗАПУЩЕН | {msk_now.strftime('%H:%M:%S')} МСК")
+        logger.info(f"🚀 SMC Trading Bot v11.0 ЗАПУЩЕН | {msk_now.strftime('%H:%M:%S')} МСК")
         logger.info(f"📊 Тикеров: {len(TICKERS)}")
         logger.info(f"⏱ Интервал: {INTERVAL} мин")
         logger.info(f"🎯 Множители: 1.2x")
-        logger.info(f"📡 API: start=0")
         logger.info("=" * 60)
         
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"✅ <b>Бот v10.0 запущен!</b>\n"
+                text=f"✅ <b>Бот v11.0 запущен!</b>\n"
                      f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
                      f"📊 {len(TICKERS)} тикеров\n"
-                     f"⏱ Интервал: {INTERVAL} мин\n"
-                     f"🎯 Множители: 1.2x\n\n"
+                     f"⏱ Интервал: {INTERVAL} мин\n\n"
                      "<i>/test - статистика отказов</i>",
                 parse_mode='HTML'
             )
@@ -647,7 +658,7 @@ async def main_loop():
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        logger.info("Запуск SMC Trading Bot v10.0...")
+        logger.info("Запуск SMC Trading Bot v11.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
