@@ -33,6 +33,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 if not TOKEN or not CHAT_ID:
     raise ValueError("TOKEN and CHAT_ID must be set in .env file")
 
+# Временная зона МСК
+MSK_TZ = timezone(timedelta(hours=3))
+
 # Тикеры
 TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "VTBR", "ROSN", "TATN", "NVTK", "PLZL", "SNGS"]
 
@@ -53,6 +56,18 @@ ticks_without_data = 0
 last_status_time = time.time()
 steps_failed = {"step1": 0, "step2": 0, "step3": 0, "step4": 0, "step5": 0, "step6": 0}
 
+# ================= ФУНКЦИИ ВРЕМЕНИ =================
+
+def get_msk_time():
+    """Текущее время МСК"""
+    return datetime.now(MSK_TZ)
+
+def to_msk(dt):
+    """Конвертация времени в МСК"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MSK_TZ)
+
 # ================= MOEX API =================
 
 async def fetch_json(session, url):
@@ -69,7 +84,8 @@ async def fetch_json(session, url):
 async def get_candles(session, ticker):
     """Получение ТОЛЬКО актуальных свечей за сегодня"""
     
-    today = datetime.now().strftime('%Y-%m-%d')
+    msk_now = get_msk_time()
+    today = msk_now.strftime('%Y-%m-%d')
     
     # Запрашиваем ТОЛЬКО сегодняшние данные
     url = (f"{BASE_URL}/{ticker}/candles.json"
@@ -103,7 +119,10 @@ async def get_candles(session, ticker):
     
     df = df[available].copy()
     
+    # КОНВЕРТАЦИЯ ВРЕМЕНИ В МСК
     df['date'] = pd.to_datetime(df['date'])
+    df['date'] = df['date'].apply(lambda x: to_msk(x))
+    
     for c in available:
         if c != 'date':
             df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -120,7 +139,8 @@ async def get_candles(session, ticker):
     first_date = df['date'].iloc[0]
     last_date = df['date'].iloc[-1]
     
-    logger.info(f"✅ {ticker}: {len(df)} свечей | {first_date} → {last_date} | Цена: {last_price:.2f} | Объем: {last_volume:.0f}")
+    # Время в МСК
+    logger.info(f"✅ {ticker}: {len(df)} свечей | {first_date.strftime('%H:%M')} → {last_date.strftime('%H:%M')} МСК | Цена: {last_price:.2f} | Объем: {last_volume:.0f}")
     return df
 
 
@@ -316,7 +336,9 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
         steps_failed["step6"] += 1
         return None
     
-    logger.info(f"🎯 {ticker}: СИГНАЛ {side}! Цена={current_price:.2f}")
+    # Время последней свечи в МСК
+    last_time = df['date'].iloc[-1]
+    logger.info(f"🎯 {ticker}: СИГНАЛ {side}! Цена={current_price:.2f} | Время свечи: {last_time.strftime('%H:%M:%S')} МСК")
     
     return {
         "side": side,
@@ -326,7 +348,7 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
         "bid_vol": bid_vol or 0,
         "ask_vol": ask_vol or 0,
         "volume_ratio": (bid_vol / ask_vol) if (ask_vol and ask_vol > 0) else 0,
-        "timestamp": pd.Timestamp.now()
+        "timestamp": last_time  # Время в МСК
     }
 
 
@@ -345,6 +367,9 @@ async def send_telegram_signal(ticker, signal, bot):
         fvg_mid = (fvg_low + fvg_high) / 2
         emoji = "🟢" if signal['side'] == "LONG" else "🔴"
         
+        # Время в МСК
+        msk_time = signal['timestamp'].strftime('%H:%M:%S') if hasattr(signal['timestamp'], 'strftime') else str(signal['timestamp'])
+        
         message = (
             f"{emoji} <b>{ticker}</b> - <b>{signal['side']}</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
@@ -352,7 +377,7 @@ async def send_telegram_signal(ticker, signal, bot):
             f"📊 FVG: <b>{fvg_low:.2f}</b> - <b>{fvg_high:.2f}</b>\n"
             f"🎯 Mid: <b>{fvg_mid:.2f}</b>\n"
             f"📈 Стакан: <b>{signal['bias']}</b>\n"
-            f"⏰ {signal['timestamp'].strftime('%H:%M:%S')}"
+            f"⏰ {msk_time} МСК"
         )
         
         await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
@@ -386,8 +411,11 @@ async def send_hourly_status(bot):
         h, m = int(uptime // 3600), int((uptime % 3600) // 60)
         total_fails = sum(steps_failed.values())
         
+        msk_now = get_msk_time()
+        
         message = (
-            "📊 <b>ЕЖЕЧАСНЫЙ ОТЧЕТ</b>\n\n"
+            f"📊 <b>ЕЖЕЧАСНЫЙ ОТЧЕТ</b>\n"
+            f"🕐 {msk_now.strftime('%H:%M')} МСК\n\n"
             f"⏱ Аптайм: {h}ч {m}м\n"
             f"🔄 Циклов: {total_cycles}\n"
             f"📤 Сигналов: {signals_found}\n\n"
@@ -414,8 +442,10 @@ async def send_hourly_status(bot):
 # ================= COMMANDS =================
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msk_now = get_msk_time()
     await update.message.reply_text(
-        "🚀 <b>SMC Trading Bot v8.0</b>\n\n"
+        f"🚀 <b>SMC Trading Bot v9.0</b>\n\n"
+        f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
         f"📊 Тикеров: {len(TICKERS)}\n"
         f"⏱ Интервал: {INTERVAL} мин\n"
         f"🎯 Множители: 1.2x\n\n"
@@ -431,9 +461,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = time.time() - start_time
     h, m = int(uptime // 3600), int((uptime % 3600) // 60)
+    msk_now = get_msk_time()
     
     await update.message.reply_text(
-        f"📊 <b>Статус</b>\n\n"
+        f"📊 <b>Статус</b>\n"
+        f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n\n"
         f"⏱ Аптайм: {h}ч {m}м\n"
         f"🔄 Циклов: {total_cycles}\n"
         f"📤 Сигналов: {signals_found}\n"
@@ -445,9 +477,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_fails = sum(steps_failed.values())
+    msk_now = get_msk_time()
     
     message = (
-        f"📊 <b>АНАЛИЗ ОТКАЗОВ</b>\n\n"
+        f"📊 <b>АНАЛИЗ ОТКАЗОВ</b>\n"
+        f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n\n"
         f"🔄 Циклов: {total_cycles}\n"
         f"✅ С данными: {ticks_with_data}\n"
         f"❌ Без данных: {ticks_without_data}\n\n"
@@ -490,13 +524,14 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 <b>SMC Стратегия v8.0:</b>\n\n"
+        "📚 <b>SMC Стратегия v9.0:</b>\n\n"
         "1️⃣ Захват ликвидности\n"
         "2️⃣ Импульс (1.2x среднего)\n"
         "3️⃣ Объем (1.2x среднего)\n"
         "4️⃣ Fair Value Gap\n"
         "5️⃣ Анализ стакана\n"
         "6️⃣ Близость к FVG (< 2%)\n\n"
+        "🕐 Время: МСК (UTC+3)\n\n"
         "/start /status /test /tickers /signals /help",
         parse_mode='HTML'
     )
@@ -547,22 +582,24 @@ async def main_loop():
     timeout = aiohttp.ClientTimeout(total=30)
     
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        msk_now = get_msk_time()
+        
         logger.info("=" * 60)
-        logger.info("🚀 SMC Trading Bot v8.0 ЗАПУЩЕН")
+        logger.info(f"🚀 SMC Trading Bot v9.0 ЗАПУЩЕН ({msk_now.strftime('%H:%M:%S')} МСК)")
         logger.info(f"📊 Тикеров: {len(TICKERS)}")
         logger.info(f"⏱ Интервал: {INTERVAL} мин")
         logger.info(f"🎯 Множители: 1.2x")
-        logger.info(f"📅 Данные: ТОЛЬКО за сегодня")
+        logger.info(f"🕐 Часовой пояс: МСК (UTC+3)")
         logger.info("=" * 60)
         
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text="✅ <b>Бот v8.0 запущен!</b>\n"
+                text=f"✅ <b>Бот v9.0 запущен!</b>\n"
+                     f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
                      f"📊 {len(TICKERS)} тикеров\n"
                      f"⏱ Интервал: {INTERVAL} мин\n"
-                     f"🎯 Множители: 1.2x\n"
-                     f"📅 Только сегодняшние данные\n\n"
+                     f"🎯 Множители: 1.2x\n\n"
                      "<i>/test - статистика отказов</i>",
                 parse_mode='HTML'
             )
@@ -580,7 +617,8 @@ async def main_loop():
                 logger.info(f"⏳ Цикл #{total_cycles}: ожидание {wait_time:.0f}с")
                 await asyncio.sleep(wait_time)
                 
-                logger.info(f"🔄 Цикл #{total_cycles}: сканирование...")
+                msk_now = get_msk_time()
+                logger.info(f"🔄 Цикл #{total_cycles}: сканирование... ({msk_now.strftime('%H:%M:%S')} МСК)")
                 
                 tasks = [process_ticker(session, ticker, bot) for ticker in TICKERS]
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -603,7 +641,7 @@ async def main_loop():
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        logger.info("Запуск SMC Trading Bot v8.0...")
+        logger.info("Запуск SMC Trading Bot v9.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
