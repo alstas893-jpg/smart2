@@ -62,12 +62,6 @@ def get_msk_time():
     """Текущее время МСК"""
     return datetime.now(MSK_TZ)
 
-def to_msk(dt):
-    """Конвертация времени в МСК"""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(MSK_TZ)
-
 # ================= MOEX API =================
 
 async def fetch_json(session, url):
@@ -82,65 +76,79 @@ async def fetch_json(session, url):
 
 
 async def get_candles(session, ticker):
-    """Получение ТОЛЬКО актуальных свечей за сегодня"""
+    """Получение актуальных свечей через start=0"""
     
     msk_now = get_msk_time()
-    today = msk_now.strftime('%Y-%m-%d')
     
-    # Запрашиваем ТОЛЬКО сегодняшние данные
+    # Запрашиваем данные с начала сегодняшнего дня через start=0
     url = (f"{BASE_URL}/{ticker}/candles.json"
-           f"?from={today}&till={today}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
-    
-    logger.debug(f"🌐 {ticker}: запрос свечей за {today}")
+           f"?interval={INTERVAL}&start=0&iss.meta=off&iss.only=candles")
     
     data = await fetch_json(session, url)
     
+    # Если start=0 не сработал, пробуем через даты
+    if not data or 'candles' not in data or not data['candles']['data']:
+        today = msk_now.strftime('%Y-%m-%d')
+        url = (f"{BASE_URL}/{ticker}/candles.json"
+               f"?from={today}&till={today}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
+        data = await fetch_json(session, url)
+    
     if not data or 'candles' not in data:
-        logger.warning(f"❌ {ticker}: Нет данных за сегодня")
+        logger.warning(f"❌ {ticker}: Нет данных")
         return None
     
     rows = data['candles']['data']
     cols = data['candles']['columns']
     
     if not rows:
-        logger.warning(f"❌ {ticker}: Пустой массив свечей за сегодня")
+        logger.warning(f"❌ {ticker}: Пустой массив")
         return None
     
     # Создаем DataFrame
     df = pd.DataFrame(rows, columns=cols)
-    df = df.rename(columns={'begin': 'date'})
+    
+    # Используем end (время закрытия свечи), если есть
+    if 'end' in df.columns:
+        df = df.rename(columns={'end': 'date'})
+    elif 'begin' in df.columns:
+        df = df.rename(columns={'begin': 'date'})
+    else:
+        logger.warning(f"❌ {ticker}: Нет колонки с датой")
+        return None
     
     need = ['date', 'open', 'high', 'low', 'close', 'volume']
     available = [c for c in need if c in df.columns]
     
     if len(available) < 5:
-        logger.warning(f"❌ {ticker}: Не хватает колонок. Доступны: {available}")
+        logger.warning(f"❌ {ticker}: Не хватает колонок")
         return None
     
     df = df[available].copy()
     
-    # КОНВЕРТАЦИЯ ВРЕМЕНИ В МСК
-    df['date'] = pd.to_datetime(df['date'])
-    df['date'] = df['date'].apply(lambda x: to_msk(x))
+    # КОНВЕРТАЦИЯ ВРЕМЕНИ: UTC -> МСК (+3 часа)
+    df['date'] = pd.to_datetime(df['date']) + timedelta(hours=3)
     
     for c in available:
         if c != 'date':
             df[c] = pd.to_numeric(df[c], errors='coerce')
     
     df = df.dropna().sort_values('date')
+    
+    # Проверка актуальности последней свечи
+    last_candle_time = df['date'].iloc[-1]
+    time_diff = (msk_now - last_candle_time).total_seconds() / 60
+    
+    # Берем последние CANDLES свечей
     df = df.tail(CANDLES)
     
     if len(df) < 20:
-        logger.warning(f"❌ {ticker}: Мало свечей за сегодня ({len(df)})")
+        logger.warning(f"❌ {ticker}: Мало свечей ({len(df)})")
         return None
     
     last_price = df['close'].iloc[-1]
     last_volume = df['volume'].iloc[-1]
-    first_date = df['date'].iloc[0]
-    last_date = df['date'].iloc[-1]
     
-    # Время в МСК
-    logger.info(f"✅ {ticker}: {len(df)} свечей | {first_date.strftime('%H:%M')} → {last_date.strftime('%H:%M')} МСК | Цена: {last_price:.2f} | Объем: {last_volume:.0f}")
+    logger.info(f"✅ {ticker}: {len(df)} св. | {df['date'].iloc[0].strftime('%H:%M')}→{df['date'].iloc[-1].strftime('%H:%M')} МСК | Цена: {last_price:.2f} | Объем: {last_volume:.0f} | Отставание: {time_diff:.0f}мин")
     return df
 
 
@@ -210,7 +218,7 @@ def detect_liquidity_grab(df):
 
 
 def check_displacement(df, multiplier=1.2):
-    """Импульсное движение (смягчено до 1.2x)"""
+    """Импульсное движение"""
     try:
         last = df.iloc[-1]
         body = abs(last["close"] - last["open"])
@@ -225,7 +233,7 @@ def check_displacement(df, multiplier=1.2):
 
 
 def check_volume_spike(df, multiplier=1.2):
-    """Всплеск объема (смягчено до 1.2x)"""
+    """Всплеск объема"""
     try:
         last_vol = df.iloc[-1]["volume"]
         avg_vol = df["volume"].rolling(window=20).mean().iloc[-1]
@@ -338,7 +346,7 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
     
     # Время последней свечи в МСК
     last_time = df['date'].iloc[-1]
-    logger.info(f"🎯 {ticker}: СИГНАЛ {side}! Цена={current_price:.2f} | Время свечи: {last_time.strftime('%H:%M:%S')} МСК")
+    logger.info(f"🎯 {ticker}: СИГНАЛ {side}! Цена={current_price:.2f} | Свеча: {last_time.strftime('%H:%M:%S')} МСК")
     
     return {
         "side": side,
@@ -348,7 +356,7 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
         "bid_vol": bid_vol or 0,
         "ask_vol": ask_vol or 0,
         "volume_ratio": (bid_vol / ask_vol) if (ask_vol and ask_vol > 0) else 0,
-        "timestamp": last_time  # Время в МСК
+        "timestamp": last_time
     }
 
 
@@ -366,9 +374,7 @@ async def send_telegram_signal(ticker, signal, bot):
         fvg_low, fvg_high = min(signal['fvg']), max(signal['fvg'])
         fvg_mid = (fvg_low + fvg_high) / 2
         emoji = "🟢" if signal['side'] == "LONG" else "🔴"
-        
-        # Время в МСК
-        msk_time = signal['timestamp'].strftime('%H:%M:%S') if hasattr(signal['timestamp'], 'strftime') else str(signal['timestamp'])
+        msk_time = signal['timestamp'].strftime('%H:%M:%S')
         
         message = (
             f"{emoji} <b>{ticker}</b> - <b>{signal['side']}</b>\n"
@@ -410,7 +416,6 @@ async def send_hourly_status(bot):
         uptime = time.time() - start_time
         h, m = int(uptime // 3600), int((uptime % 3600) // 60)
         total_fails = sum(steps_failed.values())
-        
         msk_now = get_msk_time()
         
         message = (
@@ -422,7 +427,7 @@ async def send_hourly_status(bot):
             f"📈 Тикеров: {len(TICKERS)}\n"
             f"✅ С данными: {ticks_with_data}\n"
             f"❌ Без данных: {ticks_without_data}\n\n"
-            f"<b>Где отсеиваются сигналы:</b>\n"
+            f"<b>Отказы по шагам:</b>\n"
             f"1️⃣ Захват ликвидности: {steps_failed['step1']}\n"
             f"2️⃣ Импульс (1.2x): {steps_failed['step2']}\n"
             f"3️⃣ Объем (1.2x): {steps_failed['step3']}\n"
@@ -444,7 +449,7 @@ async def send_hourly_status(bot):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msk_now = get_msk_time()
     await update.message.reply_text(
-        f"🚀 <b>SMC Trading Bot v9.0</b>\n\n"
+        f"🚀 <b>SMC Trading Bot v10.0</b>\n\n"
         f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
         f"📊 Тикеров: {len(TICKERS)}\n"
         f"⏱ Интервал: {INTERVAL} мин\n"
@@ -524,14 +529,15 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 <b>SMC Стратегия v9.0:</b>\n\n"
-        "1️⃣ Захват ликвидности\n"
+        "📚 <b>SMC Стратегия v10.0:</b>\n\n"
+        "1️⃣ Захват ликвидности (20 свечей)\n"
         "2️⃣ Импульс (1.2x среднего)\n"
         "3️⃣ Объем (1.2x среднего)\n"
-        "4️⃣ Fair Value Gap\n"
+        "4️⃣ Fair Value Gap (3 свечи)\n"
         "5️⃣ Анализ стакана\n"
         "6️⃣ Близость к FVG (< 2%)\n\n"
-        "🕐 Время: МСК (UTC+3)\n\n"
+        "🕐 Время: МСК (UTC+3)\n"
+        "📡 API: start=0 (актуальные данные)\n\n"
         "/start /status /test /tickers /signals /help",
         parse_mode='HTML'
     )
@@ -585,17 +591,17 @@ async def main_loop():
         msk_now = get_msk_time()
         
         logger.info("=" * 60)
-        logger.info(f"🚀 SMC Trading Bot v9.0 ЗАПУЩЕН ({msk_now.strftime('%H:%M:%S')} МСК)")
+        logger.info(f"🚀 SMC Trading Bot v10.0 ЗАПУЩЕН | {msk_now.strftime('%H:%M:%S')} МСК")
         logger.info(f"📊 Тикеров: {len(TICKERS)}")
         logger.info(f"⏱ Интервал: {INTERVAL} мин")
         logger.info(f"🎯 Множители: 1.2x")
-        logger.info(f"🕐 Часовой пояс: МСК (UTC+3)")
+        logger.info(f"📡 API: start=0")
         logger.info("=" * 60)
         
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"✅ <b>Бот v9.0 запущен!</b>\n"
+                text=f"✅ <b>Бот v10.0 запущен!</b>\n"
                      f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
                      f"📊 {len(TICKERS)} тикеров\n"
                      f"⏱ Интервал: {INTERVAL} мин\n"
@@ -641,7 +647,7 @@ async def main_loop():
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        logger.info("Запуск SMC Trading Bot v9.0...")
+        logger.info("Запуск SMC Trading Bot v10.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
