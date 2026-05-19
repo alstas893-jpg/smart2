@@ -40,8 +40,8 @@ MSK_TZ = timezone(timedelta(hours=3))
 TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "VTBR", "ROSN", "TATN", "NVTK", "PLZL", "SNGS"]
 
 # Настройки
-INTERVAL = 1  # минут
-CANDLES = 100  # свечей для анализа
+INTERVAL = 5  # минут
+CANDLES = 60  # свечей для анализа
 
 # URL как в первом боте
 BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities"
