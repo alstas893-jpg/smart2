@@ -66,41 +66,53 @@ async def fetch_json(session, url):
     return None
 
 
-async def get_candles(session, ticker, days=2):
-    """Получение свечей"""
-    till = datetime.now().strftime('%Y-%m-%d')
-    frm = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+async def get_candles(session, ticker):
+    """Получение ТОЛЬКО актуальных свечей за сегодня"""
     
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # Запрашиваем ТОЛЬКО сегодняшние данные
     url = (f"{BASE_URL}/{ticker}/candles.json"
-           f"?from={frm}&till={till}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
+           f"?from={today}&till={today}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
+    
+    logger.debug(f"🌐 {ticker}: запрос свечей за {today}")
     
     data = await fetch_json(session, url)
+    
     if not data or 'candles' not in data:
-        logger.warning(f"❌ {ticker}: Нет данных свечей")
+        logger.warning(f"❌ {ticker}: Нет данных за сегодня")
         return None
     
     rows = data['candles']['data']
     cols = data['candles']['columns']
     
     if not rows:
-        logger.warning(f"❌ {ticker}: Пустой массив свечей")
+        logger.warning(f"❌ {ticker}: Пустой массив свечей за сегодня")
         return None
     
+    # Создаем DataFrame
     df = pd.DataFrame(rows, columns=cols)
     df = df.rename(columns={'begin': 'date'})
     
     need = ['date', 'open', 'high', 'low', 'close', 'volume']
-    df = df[need].copy()
+    available = [c for c in need if c in df.columns]
+    
+    if len(available) < 5:
+        logger.warning(f"❌ {ticker}: Не хватает колонок. Доступны: {available}")
+        return None
+    
+    df = df[available].copy()
     
     df['date'] = pd.to_datetime(df['date'])
-    for c in need[1:]:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    for c in available:
+        if c != 'date':
+            df[c] = pd.to_numeric(df[c], errors='coerce')
     
     df = df.dropna().sort_values('date')
     df = df.tail(CANDLES)
     
-    if len(df) < 50:
-        logger.warning(f"❌ {ticker}: Мало свечей ({len(df)})")
+    if len(df) < 20:
+        logger.warning(f"❌ {ticker}: Мало свечей за сегодня ({len(df)})")
         return None
     
     last_price = df['close'].iloc[-1]
@@ -177,8 +189,8 @@ def detect_liquidity_grab(df):
         return None
 
 
-def check_displacement(df, multiplier=1.5):
-    """Импульсное движение"""
+def check_displacement(df, multiplier=1.2):
+    """Импульсное движение (смягчено до 1.2x)"""
     try:
         last = df.iloc[-1]
         body = abs(last["close"] - last["open"])
@@ -192,8 +204,8 @@ def check_displacement(df, multiplier=1.5):
         return False
 
 
-def check_volume_spike(df, multiplier=1.5):
-    """Всплеск объема"""
+def check_volume_spike(df, multiplier=1.2):
+    """Всплеск объема (смягчено до 1.2x)"""
     try:
         last_vol = df.iloc[-1]["volume"]
         avg_vol = df["volume"].rolling(window=20).mean().iloc[-1]
@@ -257,27 +269,32 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
     """Генерация сигнала"""
     global steps_failed
     
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 20:
         return None
     
+    # Шаг 1: Захват ликвидности
     side = detect_liquidity_grab(df)
     if not side:
         steps_failed["step1"] += 1
         return None
     
+    # Шаг 2: Импульс
     if not check_displacement(df):
         steps_failed["step2"] += 1
         return None
     
+    # Шаг 3: Объем
     if not check_volume_spike(df):
         steps_failed["step3"] += 1
         return None
     
+    # Шаг 4: FVG
     fvg = find_fair_value_gap(df)
     if not fvg:
         steps_failed["step4"] += 1
         return None
     
+    # Шаг 5: Стакан
     ob_bias = analyze_orderbook_bias(bid_vol, ask_vol)
     
     if ob_bias != "NO_DATA":
@@ -288,6 +305,7 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
             steps_failed["step5"] += 1
             return None
     
+    # Шаг 6: Близость к FVG
     current_price = df.iloc[-1]["close"]
     fvg_low, fvg_high = min(fvg), max(fvg)
     
@@ -298,7 +316,7 @@ def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
         steps_failed["step6"] += 1
         return None
     
-    logger.info(f"🎯 {ticker}: СИГНАЛ {side}!")
+    logger.info(f"🎯 {ticker}: СИГНАЛ {side}! Цена={current_price:.2f}")
     
     return {
         "side": side,
@@ -378,8 +396,8 @@ async def send_hourly_status(bot):
             f"❌ Без данных: {ticks_without_data}\n\n"
             f"<b>Где отсеиваются сигналы:</b>\n"
             f"1️⃣ Захват ликвидности: {steps_failed['step1']}\n"
-            f"2️⃣ Импульс: {steps_failed['step2']}\n"
-            f"3️⃣ Объем: {steps_failed['step3']}\n"
+            f"2️⃣ Импульс (1.2x): {steps_failed['step2']}\n"
+            f"3️⃣ Объем (1.2x): {steps_failed['step3']}\n"
             f"4️⃣ FVG: {steps_failed['step4']}\n"
             f"5️⃣ Стакан: {steps_failed['step5']}\n"
             f"6️⃣ Расстояние до FVG: {steps_failed['step6']}\n"
@@ -397,9 +415,10 @@ async def send_hourly_status(bot):
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 <b>SMC Trading Bot v7.0</b>\n\n"
+        "🚀 <b>SMC Trading Bot v8.0</b>\n\n"
         f"📊 Тикеров: {len(TICKERS)}\n"
-        f"⏱ Интервал: {INTERVAL} мин\n\n"
+        f"⏱ Интервал: {INTERVAL} мин\n"
+        f"🎯 Множители: 1.2x\n\n"
         "/status - статистика\n"
         "/test - анализ отказов\n"
         "/tickers - тикеры\n"
@@ -434,8 +453,8 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ Без данных: {ticks_without_data}\n\n"
         f"<b>Где отсеиваются сигналы:</b>\n"
         f"1️⃣ Захват ликвидности: {steps_failed['step1']}\n"
-        f"2️⃣ Импульс: {steps_failed['step2']}\n"
-        f"3️⃣ Объем: {steps_failed['step3']}\n"
+        f"2️⃣ Импульс (1.2x): {steps_failed['step2']}\n"
+        f"3️⃣ Объем (1.2x): {steps_failed['step3']}\n"
         f"4️⃣ FVG: {steps_failed['step4']}\n"
         f"5️⃣ Стакан: {steps_failed['step5']}\n"
         f"6️⃣ Расстояние до FVG: {steps_failed['step6']}\n"
@@ -471,13 +490,13 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 <b>SMC Стратегия (6 шагов):</b>\n\n"
+        "📚 <b>SMC Стратегия v8.0:</b>\n\n"
         "1️⃣ Захват ликвидности\n"
-        "2️⃣ Импульсное движение\n"
-        "3️⃣ Всплеск объема\n"
+        "2️⃣ Импульс (1.2x среднего)\n"
+        "3️⃣ Объем (1.2x среднего)\n"
         "4️⃣ Fair Value Gap\n"
         "5️⃣ Анализ стакана\n"
-        "6️⃣ Близость к FVG\n\n"
+        "6️⃣ Близость к FVG (< 2%)\n\n"
         "/start /status /test /tickers /signals /help",
         parse_mode='HTML'
     )
@@ -529,17 +548,21 @@ async def main_loop():
     
     async with aiohttp.ClientSession(timeout=timeout) as session:
         logger.info("=" * 60)
-        logger.info("🚀 SMC Trading Bot v7.0 ЗАПУЩЕН")
+        logger.info("🚀 SMC Trading Bot v8.0 ЗАПУЩЕН")
         logger.info(f"📊 Тикеров: {len(TICKERS)}")
         logger.info(f"⏱ Интервал: {INTERVAL} мин")
+        logger.info(f"🎯 Множители: 1.2x")
+        logger.info(f"📅 Данные: ТОЛЬКО за сегодня")
         logger.info("=" * 60)
         
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text="✅ <b>Бот v7.0 запущен!</b>\n"
+                text="✅ <b>Бот v8.0 запущен!</b>\n"
                      f"📊 {len(TICKERS)} тикеров\n"
-                     f"⏱ Интервал: {INTERVAL} мин\n\n"
+                     f"⏱ Интервал: {INTERVAL} мин\n"
+                     f"🎯 Множители: 1.2x\n"
+                     f"📅 Только сегодняшние данные\n\n"
                      "<i>/test - статистика отказов</i>",
                 parse_mode='HTML'
             )
@@ -580,7 +603,7 @@ async def main_loop():
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        logger.info("Запуск SMC Trading Bot v7.0...")
+        logger.info("Запуск SMC Trading Bot v8.0...")
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
