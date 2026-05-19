@@ -120,7 +120,7 @@ async def get_candles(session, ticker):
     df = df[available].copy()
     
     # Конвертируем время: UTC -> МСК (+3 часа)
-    df['date'] = pd.to_datetime(df['date']) + timedelta(hours=3)
+    df['date'] = pd.to_datetime(df['date'])
     
     for c in available:
         if c != 'date':
