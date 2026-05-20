@@ -149,8 +149,8 @@ async def get_candles(session, ticker):
     
     time_diff = (till_dt - last_time).total_seconds() / 60
     
-    # Если последняя свеча старше, чем на 10 минут — данные устарели
-    if time_diff > 10:
+    # Если последняя свеча старше, чем на 16 минут — данные устарели
+    if time_diff > 16:
         logger.warning(f"⚠️ {ticker}: Данные устарели ({time_diff:.0f} мин), последняя свеча от {last_time.strftime('%H:%M')}")
         return None
     
