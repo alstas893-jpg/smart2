@@ -1,3 +1,4 @@
+```python
 import asyncio
 import aiohttp
 import pandas as pd
@@ -6,7 +7,8 @@ import time
 import random
 import logging
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
 from dotenv import load_dotenv
 
 from telegram.ext import (
@@ -15,19 +17,23 @@ from telegram.ext import (
     ContextTypes
 )
 
-# =========================================================
+# =====================================================
 # CONFIG
-# =========================================================
+# =====================================================
 
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-if not TOKEN or not CHAT_ID:
-    raise ValueError("TOKEN or CHAT_ID missing in .env")
+if not TOKEN:
+    raise ValueError("TOKEN missing")
+
+if not CHAT_ID:
+    raise ValueError("CHAT_ID missing")
 
 INTERVAL = 5
+
 TICKERS = [
     "SBER",
     "GAZP",
@@ -41,62 +47,84 @@ TICKERS = [
     "SNGS"
 ]
 
-BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/securities"
+BASE_URL = (
+    "https://iss.moex.com/iss/"
+    "engines/stock/markets/shares/"
+    "boards/TQBR/securities"
+)
+
+MSK = timezone(timedelta(hours=3))
 
 SEM = asyncio.Semaphore(3)
 
-# =========================================================
+# =====================================================
 # LOGGING
-# =========================================================
+# =====================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.FileHandler(
+            "bot.log",
+            encoding="utf-8"
+        ),
         logging.StreamHandler()
     ]
 )
 
 logger = logging.getLogger(__name__)
 
-# =========================================================
+# =====================================================
 # GLOBALS
-# =========================================================
+# =====================================================
 
 start_time = time.time()
 
-signals_found = 0
 cycles = 0
+signals_count = 0
 
 last_signals = {}
 
-# =========================================================
+# =====================================================
 # TIME
-# =========================================================
+# =====================================================
+
+def now_msk():
+
+    return datetime.now(MSK)
 
 def market_is_open():
 
-    now = datetime.now()
+    now = now_msk()
 
     if now.weekday() >= 5:
         return False
 
-    hour = now.hour
+    current = now.hour * 60 + now.minute
 
-    return 10 <= hour <= 23
+    market_open = 10 * 60
+    market_close = 23 * 60 + 50
 
-# =========================================================
+    return market_open <= current <= market_close
+
+# =====================================================
 # REQUESTS
-# =========================================================
+# =====================================================
 
-async def fetch_json(session, url, params=None):
+async def fetch_json(
+    session,
+    url,
+    params=None
+):
 
     for attempt in range(3):
 
         try:
 
-            await asyncio.sleep(random.uniform(0.2, 1.0))
+            await asyncio.sleep(
+                random.uniform(0.2, 1.0)
+            )
 
             async with session.get(
                 url,
@@ -104,41 +132,46 @@ async def fetch_json(session, url, params=None):
             ) as response:
 
                 if response.status != 200:
-                    logger.warning(f"HTTP {response.status}")
+
+                    logger.warning(
+                        f"HTTP {response.status}"
+                    )
+
                     continue
 
                 return await response.json()
 
         except Exception as e:
-            logger.warning(f"fetch_json retry: {e}")
+
+            logger.warning(
+                f"fetch retry: {e}"
+            )
 
         await asyncio.sleep(1)
 
     return None
 
-# =========================================================
+# =====================================================
 # CANDLES
-# =========================================================
+# =====================================================
 
-async def get_candles(session, ticker):
+async def get_candles(
+    session,
+    ticker
+):
 
     try:
 
-        now = datetime.now()
-
-        till_dt = now - timedelta(minutes=5)
-
-        from_dt = till_dt - timedelta(hours=8)
-
         params = {
-            "from": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "till": till_dt.strftime("%Y-%m-%d %H:%M:%S"),
             "interval": INTERVAL,
             "iss.meta": "off",
             "iss.only": "candles"
         }
 
-        url = f"{BASE_URL}/{ticker}/candles.json"
+        url = (
+            f"{BASE_URL}/"
+            f"{ticker}/candles.json"
+        )
 
         data = await fetch_json(
             session,
@@ -147,25 +180,59 @@ async def get_candles(session, ticker):
         )
 
         if not data:
-            logger.warning(f"{ticker}: no data")
+
+            logger.warning(
+                f"{ticker}: no data"
+            )
+
             return None
 
-        candles = data.get("candles", {})
+        candles = data.get(
+            "candles",
+            {}
+        )
 
-        rows = candles.get("data", [])
-        cols = candles.get("columns", [])
+        rows = candles.get(
+            "data",
+            []
+        )
+
+        cols = candles.get(
+            "columns",
+            []
+        )
 
         if not rows:
-            logger.warning(f"{ticker}: rows empty")
+
+            logger.warning(
+                f"{ticker}: rows empty"
+            )
+
             return None
 
-        df = pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(
+            rows,
+            columns=cols
+        )
 
         if "begin" in df.columns:
-            df["date"] = pd.to_datetime(df["begin"])
+
+            df["date"] = pd.to_datetime(
+                df["begin"]
+            )
+
         elif "end" in df.columns:
-            df["date"] = pd.to_datetime(df["end"])
+
+            df["date"] = pd.to_datetime(
+                df["end"]
+            )
+
         else:
+
+            logger.warning(
+                f"{ticker}: no date column"
+            )
+
             return None
 
         numeric_cols = [
@@ -177,44 +244,68 @@ async def get_candles(session, ticker):
         ]
 
         for col in numeric_cols:
+
             if col in df.columns:
+
                 df[col] = pd.to_numeric(
                     df[col],
                     errors="coerce"
                 )
 
         df = df.dropna(
-            subset=["open", "high", "low", "close"]
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
         )
 
         if len(df) < 20:
-            logger.warning(f"{ticker}: not enough candles")
+
+            logger.warning(
+                f"{ticker}: candles < 20"
+            )
+
             return None
 
-        df = df.sort_values("date").reset_index(drop=True)
+        df = (
+            df
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
 
         logger.info(
-            f"✅ {ticker}: "
+            f"✅ {ticker} | "
             f"{len(df)} candles | "
-            f"{df.iloc[-1]['close']}"
+            f"last={df.iloc[-1]['close']}"
         )
 
         return df
 
     except Exception as e:
-        logger.error(f"{ticker} candles error: {e}")
+
+        logger.error(
+            f"{ticker} candles error: {e}"
+        )
 
     return None
 
-# =========================================================
+# =====================================================
 # ORDERBOOK
-# =========================================================
+# =====================================================
 
-async def get_orderbook(session, ticker):
+async def get_orderbook(
+    session,
+    ticker
+):
 
     try:
 
-        url = f"{BASE_URL}/{ticker}/orderbook.json"
+        url = (
+            f"{BASE_URL}/"
+            f"{ticker}/orderbook.json"
+        )
 
         params = {
             "depth": 20
@@ -229,9 +320,15 @@ async def get_orderbook(session, ticker):
         if not data:
             return None, None
 
-        ob = data.get("orderbook", {})
+        ob = data.get(
+            "orderbook",
+            {}
+        )
 
-        rows = ob.get("data", [])
+        rows = ob.get(
+            "data",
+            []
+        )
 
         if not rows:
             return None, None
@@ -249,7 +346,7 @@ async def get_orderbook(session, ticker):
                 if side == "B":
                     bids += volume
 
-                if side == "S":
+                elif side == "S":
                     asks += volume
 
             except:
@@ -258,31 +355,49 @@ async def get_orderbook(session, ticker):
         return bids, asks
 
     except Exception as e:
-        logger.error(f"{ticker} orderbook error: {e}")
+
+        logger.error(
+            f"{ticker} orderbook error: {e}"
+        )
 
     return None, None
 
-# =========================================================
+# =====================================================
 # ANALYSIS
-# =========================================================
+# =====================================================
 
 def liquidity_grab(df):
 
     try:
 
-        high_lvl = df["high"].rolling(20).max().iloc[-2]
-        low_lvl = df["low"].rolling(20).min().iloc[-2]
+        high_lvl = (
+            df["high"]
+            .rolling(20)
+            .max()
+            .iloc[-2]
+        )
+
+        low_lvl = (
+            df["low"]
+            .rolling(20)
+            .min()
+            .iloc[-2]
+        )
 
         prev = df.iloc[-2]
         last = df.iloc[-1]
 
-        if prev["high"] > high_lvl:
-            if last["close"] < prev["high"]:
-                return "SHORT"
+        if (
+            prev["high"] > high_lvl and
+            last["close"] < prev["high"]
+        ):
+            return "SHORT"
 
-        if prev["low"] < low_lvl:
-            if last["close"] > prev["low"]:
-                return "LONG"
+        if (
+            prev["low"] < low_lvl and
+            last["close"] > prev["low"]
+        ):
+            return "LONG"
 
     except:
         pass
@@ -298,14 +413,17 @@ def displacement(df):
             df.iloc[-1]["open"]
         )
 
-        avg = (
-            abs(df["close"] - df["open"])
+        avg_body = (
+            abs(
+                df["close"] -
+                df["open"]
+            )
             .rolling(20)
             .mean()
             .iloc[-1]
         )
 
-        return body > avg * 1.2
+        return body > avg_body * 1.2
 
     except:
         return False
@@ -314,16 +432,16 @@ def volume_spike(df):
 
     try:
 
-        last = df.iloc[-1]["volume"]
+        last_vol = df.iloc[-1]["volume"]
 
-        avg = (
+        avg_vol = (
             df["volume"]
             .rolling(20)
             .mean()
             .iloc[-1]
         )
 
-        return last > avg * 1.2
+        return last_vol > avg_vol * 1.2
 
     except:
         return False
@@ -336,12 +454,14 @@ def fair_value_gap(df):
         c3 = df.iloc[-1]
 
         if c1["high"] < c3["low"]:
+
             return (
                 c1["high"],
                 c3["low"]
             )
 
         if c1["low"] > c3["high"]:
+
             return (
                 c3["high"],
                 c1["low"]
@@ -352,9 +472,12 @@ def fair_value_gap(df):
 
     return None
 
-def orderbook_bias(bids, asks):
+def orderbook_bias(
+    bids,
+    asks
+):
 
-    if bids is None or asks is None:
+    if bids is None:
         return "NEUTRAL"
 
     if asks == 0:
@@ -370,11 +493,15 @@ def orderbook_bias(bids, asks):
 
     return "NEUTRAL"
 
-# =========================================================
+# =====================================================
 # SIGNAL
-# =========================================================
+# =====================================================
 
-def generate_signal(df, bids, asks):
+def generate_signal(
+    df,
+    bids,
+    asks
+):
 
     side = liquidity_grab(df)
 
@@ -392,7 +519,10 @@ def generate_signal(df, bids, asks):
     if not fvg:
         return None
 
-    bias = orderbook_bias(bids, asks)
+    bias = orderbook_bias(
+        bids,
+        asks
+    )
 
     if side == "LONG" and bias == "SELL":
         return None
@@ -402,32 +532,53 @@ def generate_signal(df, bids, asks):
 
     return {
         "side": side,
-        "price": float(df.iloc[-1]["close"]),
+        "price": float(
+            df.iloc[-1]["close"]
+        ),
         "fvg": fvg,
         "bias": bias
     }
 
-# =========================================================
+# =====================================================
 # TELEGRAM
-# =========================================================
+# =====================================================
 
-async def send_signal(bot, ticker, signal):
+async def send_signal(
+    bot,
+    ticker,
+    signal
+):
 
-    global signals_found
+    global signals_count
 
-    key = f"{ticker}_{signal['side']}"
+    key = (
+        f"{ticker}_"
+        f"{signal['side']}"
+    )
 
     if key in last_signals:
-        if time.time() - last_signals[key] < 3600:
+
+        if (
+            time.time() -
+            last_signals[key]
+        ) < 3600:
+
             return
 
-    emoji = "🟢" if signal["side"] == "LONG" else "🔴"
+    emoji = (
+        "🟢"
+        if signal["side"] == "LONG"
+        else "🔴"
+    )
 
     text = (
         f"{emoji} <b>{ticker}</b>\n\n"
-        f"📈 Signal: <b>{signal['side']}</b>\n"
-        f"💵 Price: <b>{signal['price']:.2f}</b>\n"
-        f"📊 Bias: <b>{signal['bias']}</b>\n"
+        f"📈 Signal: "
+        f"<b>{signal['side']}</b>\n"
+        f"💵 Price: "
+        f"<b>{signal['price']:.2f}</b>\n"
+        f"📊 Bias: "
+        f"<b>{signal['bias']}</b>\n"
         f"🎯 FVG: "
         f"{signal['fvg'][0]:.2f} - "
         f"{signal['fvg'][1]:.2f}"
@@ -441,18 +592,25 @@ async def send_signal(bot, ticker, signal):
             parse_mode="HTML"
         )
 
-        signals_found += 1
-
         last_signals[key] = time.time()
 
-        logger.info(f"📤 {ticker} {signal['side']}")
+        signals_count += 1
+
+        logger.info(
+            f"📤 SIGNAL "
+            f"{ticker} "
+            f"{signal['side']}"
+        )
 
     except Exception as e:
-        logger.error(f"telegram error: {e}")
 
-# =========================================================
+        logger.error(
+            f"telegram error: {e}"
+        )
+
+# =====================================================
 # PROCESS
-# =========================================================
+# =====================================================
 
 async def process_ticker(
     session,
@@ -472,9 +630,11 @@ async def process_ticker(
             if df is None:
                 return
 
-            bids, asks = await get_orderbook(
-                session,
-                ticker
+            bids, asks = (
+                await get_orderbook(
+                    session,
+                    ticker
+                )
             )
 
             signal = generate_signal(
@@ -484,6 +644,7 @@ async def process_ticker(
             )
 
             if signal:
+
                 await send_signal(
                     bot,
                     ticker,
@@ -491,11 +652,14 @@ async def process_ticker(
                 )
 
         except Exception as e:
-            logger.error(f"{ticker}: {e}")
 
-# =========================================================
+            logger.error(
+                f"{ticker}: {e}"
+            )
+
+# =====================================================
 # COMMANDS
-# =========================================================
+# =====================================================
 
 async def status_cmd(
     update,
@@ -510,26 +674,33 @@ async def status_cmd(
         f"📊 BOT STATUS\n\n"
         f"⏱ Uptime: {uptime}s\n"
         f"🔄 Cycles: {cycles}\n"
-        f"📤 Signals: {signals_found}\n"
+        f"📤 Signals: {signals_count}\n"
         f"📈 Tickers: {len(TICKERS)}"
     )
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text
+    )
 
-# =========================================================
-# MAIN LOOP
-# =========================================================
+# =====================================================
+# SCANNER
+# =====================================================
 
 async def scanner(application):
 
     global cycles
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
     timeout = aiohttp.ClientTimeout(
         total=30
     )
 
     async with aiohttp.ClientSession(
-        timeout=timeout
+        timeout=timeout,
+        headers=headers
     ) as session:
 
         bot = application.bot
@@ -557,11 +728,13 @@ async def scanner(application):
                 )
 
                 tasks = [
+
                     process_ticker(
                         session,
                         ticker,
                         bot
                     )
+
                     for ticker in TICKERS
                 ]
 
@@ -572,7 +745,7 @@ async def scanner(application):
 
                 logger.info(
                     f"Cycle done | "
-                    f"signals={signals_found}"
+                    f"signals={signals_count}"
                 )
 
                 await asyncio.sleep(
@@ -587,9 +760,9 @@ async def scanner(application):
 
                 await asyncio.sleep(30)
 
-# =========================================================
+# =====================================================
 # MAIN
-# =========================================================
+# =====================================================
 
 async def main():
 
@@ -607,20 +780,26 @@ async def main():
     )
 
     await app.initialize()
+
     await app.start()
 
     await app.updater.start_polling()
+
+    logger.info(
+        "Telegram polling started"
+    )
 
     asyncio.create_task(
         scanner(app)
     )
 
-    logger.info("Polling started")
-
     while True:
+
         await asyncio.sleep(3600)
 
-# =========================================================
+# =====================================================
+# START
+# =====================================================
 
 if __name__ == "__main__":
 
@@ -630,4 +809,4 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
 
-        logger.info("Stopped")
+        logger.info("Bot stopped")
