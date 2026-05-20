@@ -81,11 +81,15 @@ async def fetch_json(session, url):
 async def get_candles(session, ticker):
     msk_now = get_msk_time()
     
-    # Запрашиваем только последние ~2 часа вместо всего дня
-    from_dt = msk_now - timedelta(hours=2)
+    # --- КЛЮЧЕВЫЕ ИСПРАВЛЕНИЯ ---
+    # 1. Увеличиваем окно, чтобы всегда была история
+    from_dt = msk_now - timedelta(hours=6)
     from_str = from_dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 2. ЗАПРАШИВАЕМ ПРОШЛУЮ ЗАКРЫТУЮ МИНУТУ, а не текущую
     till_dt = msk_now - timedelta(minutes=1)
     till_str = till_dt.strftime('%Y-%m-%d %H:%M:%S')
+    # -------------------------
     
     url = (f"{BASE_URL}/{ticker}/candles.json"
            f"?from={from_str}&till={till_str}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
@@ -93,16 +97,20 @@ async def get_candles(session, ticker):
     data = await fetch_json(session, url)
     
     if not data or 'candles' not in data:
-        logger.warning(f"❌ {ticker}: Нет данных")
+        # Уровень warning — если данных нет даже по SBER в середине дня
+        logger.warning(f"❌ {ticker}: Нет данных от API")
         return None
     
     rows = data['candles']['data']
     cols = data['candles']['columns']
     
     if not rows:
-        logger.warning(f"❌ {ticker}: Пустой массив")
+        # Если rows пустой — это не страшно, может быть только начало торгов по редкому тикеру
+        # Но для SBER после 10 утра — это уже проблема, оставим warning
+        logger.warning(f"❌ {ticker}: Пустой массив (rows = [])")
         return None
     
+    # --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
     df = pd.DataFrame(rows, columns=cols)
     
     if 'end' in df.columns:
@@ -121,8 +129,6 @@ async def get_candles(session, ticker):
         return None
     
     df = df[available].copy()
-    
-    # API возвращает время уже в МСК — НЕ прибавляем +3
     df['date'] = pd.to_datetime(df['date'])
     
     for c in available:
@@ -132,28 +138,23 @@ async def get_candles(session, ticker):
     df = df.dropna().sort_values('date').reset_index(drop=True)
     
     if len(df) < 5:
-        logger.warning(f"❌ {ticker}: Мало свечей ({len(df)})")
+        logger.warning(f"⚠️ {ticker}: Данных меньше 5 свечей ({len(df)}), возможно, не хватает истории")
         return None
     
+    # --- ПРОВЕРКА АКТУАЛЬНОСТИ (теперь till_dt на минуту назад, так что всё ок)---
+    last_time = df['date'].iloc[-1]
     last_price = df['close'].iloc[-1]
     last_volume = df['volume'].iloc[-1]
     first_time = df['date'].iloc[0]
-    last_time = df['date'].iloc[-1]
     
-    msk_now_naive = msk_now.replace(tzinfo=None)
-    time_diff = (msk_now_naive - last_time).total_seconds() / 60
+    time_diff = (till_dt - last_time).total_seconds() / 60
     
-    # Отсеиваем если последняя свеча старше 5 минут
-    if time_diff > 16:
-        logger.warning(f"⚠️ {ticker}: Данные устарели ({time_diff:.0f} мин), пропускаем")
+    # Если последняя свеча старше, чем на 10 минут — данные устарели
+    if time_diff > 10:
+        logger.warning(f"⚠️ {ticker}: Данные устарели ({time_diff:.0f} мин), последняя свеча от {last_time.strftime('%H:%M')}")
         return None
     
-    if time_diff < 0:
-        logger.warning(f"⚠️ {ticker}: Время в будущем, пропускаем")
-        return None
-    
-    logger.info(f"✅ {ticker}: {len(df)} св. | {first_time.strftime('%H:%M')}→{last_time.strftime('%H:%M')} МСК | "
-                f"Цена: {last_price:.2f} | Объем: {last_volume:.0f} | Отставание: {time_diff:.0f}мин")
+    logger.info(f"✅ {ticker}: {len(df)} св. | {first_time.strftime('%H:%M')} → {last_time.strftime('%H:%M')} | Цена: {last_price:.2f} | Объем: {last_volume:.0f}")
     return df
 
 async def get_orderbook(session, ticker):
