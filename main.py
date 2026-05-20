@@ -84,7 +84,8 @@ async def get_candles(session, ticker):
     # Запрашиваем только последние ~2 часа вместо всего дня
     from_dt = msk_now - timedelta(hours=2)
     from_str = from_dt.strftime('%Y-%m-%d %H:%M:%S')
-    till_str = msk_now.strftime('%Y-%m-%d %H:%M:%S')
+    till_dt = msk_now - timedelta(minutes=1)
+    till_str = till_dt.strftime('%Y-%m-%d %H:%M:%S')
     
     url = (f"{BASE_URL}/{ticker}/candles.json"
            f"?from={from_str}&till={till_str}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
