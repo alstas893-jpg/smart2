@@ -3,689 +3,631 @@ import aiohttp
 import pandas as pd
 import os
 import time
+import random
 import logging
-import warnings
-from datetime import datetime, timedelta, timezone
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.error import TelegramError
+
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-warnings.filterwarnings('ignore')
-
-# ================= LOGGING SETUP =================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes
 )
-logger = logging.getLogger(__name__)
 
-# ================= CONFIG =================
+# =========================================================
+# CONFIG
+# =========================================================
+
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 if not TOKEN or not CHAT_ID:
-    raise ValueError("TOKEN and CHAT_ID must be set in .env file")
+    raise ValueError("TOKEN or CHAT_ID missing in .env")
 
-# Временная зона МСК
-MSK_TZ = timezone(timedelta(hours=3))
+INTERVAL = 5
+TICKERS = [
+    "SBER",
+    "GAZP",
+    "LKOH",
+    "GMKN",
+    "VTBR",
+    "ROSN",
+    "TATN",
+    "NVTK",
+    "PLZL",
+    "SNGS"
+]
 
-# Тикеры
-TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "VTBR", "ROSN", "TATN", "NVTK", "PLZL", "SNGS"]
+BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/securities"
 
-# Настройки
-INTERVAL = 5  # минут
-CANDLES = 60  # свечей для анализа
+SEM = asyncio.Semaphore(3)
 
-# URL как в первом боте
-BASE_URL = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities"
+# =========================================================
+# LOGGING
+# =========================================================
 
-# Статистика
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# =========================================================
+# GLOBALS
+# =========================================================
+
 start_time = time.time()
-last_signals = {}
-total_cycles = 0
+
 signals_found = 0
-ticks_with_data = 0
-ticks_without_data = 0
-last_status_time = time.time()
-steps_failed = {"step1": 0, "step2": 0, "step3": 0, "step4": 0, "step5": 0, "step6": 0}
+cycles = 0
 
-# Глобальная переменная для хранения application
-application = None
+last_signals = {}
 
-# ================= ФУНКЦИИ ВРЕМЕНИ =================
+# =========================================================
+# TIME
+# =========================================================
 
-def get_msk_time():
-    """Текущее время МСК"""
-    return datetime.now(MSK_TZ)
+def market_is_open():
 
-# ================= MOEX API =================
+    now = datetime.now()
 
-async def fetch_json(session, url):
-    """Простая функция как в первом боте"""
-    try:
-        async with session.get(url) as response:
-            if response.status == 200:
+    if now.weekday() >= 5:
+        return False
+
+    hour = now.hour
+
+    return 10 <= hour <= 23
+
+# =========================================================
+# REQUESTS
+# =========================================================
+
+async def fetch_json(session, url, params=None):
+
+    for attempt in range(3):
+
+        try:
+
+            await asyncio.sleep(random.uniform(0.2, 1.0))
+
+            async with session.get(
+                url,
+                params=params
+            ) as response:
+
+                if response.status != 200:
+                    logger.warning(f"HTTP {response.status}")
+                    continue
+
                 return await response.json()
-    except:
-        pass
+
+        except Exception as e:
+            logger.warning(f"fetch_json retry: {e}")
+
+        await asyncio.sleep(1)
+
     return None
 
+# =========================================================
+# CANDLES
+# =========================================================
 
 async def get_candles(session, ticker):
-    msk_now = get_msk_time()
-    
-    # --- КЛЮЧЕВЫЕ ИСПРАВЛЕНИЯ ---
-    # 1. Увеличиваем окно, чтобы всегда была история
-    from_dt = msk_now - timedelta(hours=6)
-    from_str = from_dt.strftime('%Y-%m-%d %H:%M:%S')
-    
-    # 2. ЗАПРАШИВАЕМ ПРОШЛУЮ ЗАКРЫТУЮ МИНУТУ, а не текущую
-    till_dt = msk_now - timedelta(minutes=1)
-    till_str = till_dt.strftime('%Y-%m-%d %H:%M:%S')
-    # -------------------------
-    
-    url = (f"{BASE_URL}/{ticker}/candles.json"
-           f"?from={from_str}&till={till_str}&interval={INTERVAL}&iss.meta=off&iss.only=candles")
-    
-    data = await fetch_json(session, url)
-    
-    if not data or 'candles' not in data:
-        # Уровень warning — если данных нет даже по SBER в середине дня
-        logger.warning(f"❌ {ticker}: Нет данных от API")
-        return None
-    
-    rows = data['candles']['data']
-    cols = data['candles']['columns']
-    
-    if not rows:
-        # Если rows пустой — это не страшно, может быть только начало торгов по редкому тикеру
-        # Но для SBER после 10 утра — это уже проблема, оставим warning
-        logger.warning(f"❌ {ticker}: Пустой массив (rows = [])")
-        return None
-    
-    # --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
-    df = pd.DataFrame(rows, columns=cols)
-    
-    if 'end' in df.columns:
-        df = df.rename(columns={'end': 'date'})
-    elif 'begin' in df.columns:
-        df = df.rename(columns={'begin': 'date'})
-    else:
-        logger.warning(f"❌ {ticker}: Нет колонки с датой")
-        return None
-    
-    need = ['date', 'open', 'high', 'low', 'close', 'volume']
-    available = [c for c in need if c in df.columns]
-    
-    if len(available) < 5:
-        logger.warning(f"❌ {ticker}: Не хватает колонок")
-        return None
-    
-    df = df[available].copy()
-    df['date'] = pd.to_datetime(df['date'])
-    
-    for c in available:
-        if c != 'date':
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-    
-    df = df.dropna().sort_values('date').reset_index(drop=True)
-    
-    if len(df) < 5:
-        logger.warning(f"⚠️ {ticker}: Данных меньше 5 свечей ({len(df)}), возможно, не хватает истории")
-        return None
-    
-    # --- ПРОВЕРКА АКТУАЛЬНОСТИ (теперь till_dt на минуту назад, так что всё ок)---
-    last_time = df['date'].iloc[-1]
-    last_price = df['close'].iloc[-1]
-    last_volume = df['volume'].iloc[-1]
-    first_time = df['date'].iloc[0]
-    
-    time_diff = (till_dt - last_time).total_seconds() / 60
-    
-    # Если последняя свеча старше, чем на 16 минут — данные устарели
-    if time_diff > 16:
-        logger.warning(f"⚠️ {ticker}: Данные устарели ({time_diff:.0f} мин), последняя свеча от {last_time.strftime('%H:%M')}")
-        return None
-    
-    logger.info(f"✅ {ticker}: {len(df)} св. | {first_time.strftime('%H:%M')} → {last_time.strftime('%H:%M')} | Цена: {last_price:.2f} | Объем: {last_volume:.0f}")
-    return df
+
+    try:
+
+        now = datetime.now()
+
+        till_dt = now - timedelta(minutes=5)
+
+        from_dt = till_dt - timedelta(hours=8)
+
+        params = {
+            "from": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "till": till_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "interval": INTERVAL,
+            "iss.meta": "off",
+            "iss.only": "candles"
+        }
+
+        url = f"{BASE_URL}/{ticker}/candles.json"
+
+        data = await fetch_json(
+            session,
+            url,
+            params=params
+        )
+
+        if not data:
+            logger.warning(f"{ticker}: no data")
+            return None
+
+        candles = data.get("candles", {})
+
+        rows = candles.get("data", [])
+        cols = candles.get("columns", [])
+
+        if not rows:
+            logger.warning(f"{ticker}: rows empty")
+            return None
+
+        df = pd.DataFrame(rows, columns=cols)
+
+        if "begin" in df.columns:
+            df["date"] = pd.to_datetime(df["begin"])
+        elif "end" in df.columns:
+            df["date"] = pd.to_datetime(df["end"])
+        else:
+            return None
+
+        numeric_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col],
+                    errors="coerce"
+                )
+
+        df = df.dropna(
+            subset=["open", "high", "low", "close"]
+        )
+
+        if len(df) < 20:
+            logger.warning(f"{ticker}: not enough candles")
+            return None
+
+        df = df.sort_values("date").reset_index(drop=True)
+
+        logger.info(
+            f"✅ {ticker}: "
+            f"{len(df)} candles | "
+            f"{df.iloc[-1]['close']}"
+        )
+
+        return df
+
+    except Exception as e:
+        logger.error(f"{ticker} candles error: {e}")
+
+    return None
+
+# =========================================================
+# ORDERBOOK
+# =========================================================
 
 async def get_orderbook(session, ticker):
-    """Получение стакана"""
-    url = f"{BASE_URL}/{ticker}/orderbook.json"
-    
+
     try:
-        async with session.get(url) as response:
-            if response.status != 200:
-                return None, None
-            
-            data = await response.json()
-            if not data or 'orderbook' not in data:
-                return None, None
-            
-            orderbook_data = data['orderbook']['data']
-            if not orderbook_data or not orderbook_data[0]:
-                return None, None
-            
-            row = orderbook_data[0]
-            bids = row[2] if len(row) > 2 and row[2] else []
-            asks = row[3] if len(row) > 3 and row[3] else []
-            
-            bid_vol = sum(b[1] for b in bids if len(b) > 1) if bids else 0
-            ask_vol = sum(a[1] for a in asks if len(a) > 1) if asks else 0
-            
-            if bid_vol > 0 or ask_vol > 0:
-                return bid_vol, ask_vol
-    except:
-        pass
-    
+
+        url = f"{BASE_URL}/{ticker}/orderbook.json"
+
+        params = {
+            "depth": 20
+        }
+
+        data = await fetch_json(
+            session,
+            url,
+            params=params
+        )
+
+        if not data:
+            return None, None
+
+        ob = data.get("orderbook", {})
+
+        rows = ob.get("data", [])
+
+        if not rows:
+            return None, None
+
+        bids = 0
+        asks = 0
+
+        for row in rows:
+
+            try:
+
+                side = row[0]
+                volume = row[2]
+
+                if side == "B":
+                    bids += volume
+
+                if side == "S":
+                    asks += volume
+
+            except:
+                pass
+
+        return bids, asks
+
+    except Exception as e:
+        logger.error(f"{ticker} orderbook error: {e}")
+
     return None, None
 
+# =========================================================
+# ANALYSIS
+# =========================================================
 
-# ================= TECHNICAL ANALYSIS =================
+def liquidity_grab(df):
 
-def calculate_liquidity_levels(df):
-    """Уровни ликвидности"""
     try:
-        high_lvl = df["high"].rolling(window=20).max().iloc[-2]
-        low_lvl = df["low"].rolling(window=20).min().iloc[-2]
-        return high_lvl, low_lvl
-    except:
-        return None, None
 
+        high_lvl = df["high"].rolling(20).max().iloc[-2]
+        low_lvl = df["low"].rolling(20).min().iloc[-2]
 
-def detect_liquidity_grab(df):
-    """Захват ликвидности"""
-    try:
         prev = df.iloc[-2]
         last = df.iloc[-1]
-        
-        high_lvl, low_lvl = calculate_liquidity_levels(df)
-        if high_lvl is None:
-            return None
-        
-        if prev["high"] > high_lvl and last["close"] < prev["high"]:
-            return "SHORT"
-        
-        if prev["low"] < low_lvl and last["close"] > prev["low"]:
-            return "LONG"
-        
-        return None
+
+        if prev["high"] > high_lvl:
+            if last["close"] < prev["high"]:
+                return "SHORT"
+
+        if prev["low"] < low_lvl:
+            if last["close"] > prev["low"]:
+                return "LONG"
+
     except:
-        return None
+        pass
 
+    return None
 
-def check_displacement(df, multiplier=1.2):
-    """Импульсное движение"""
+def displacement(df):
+
     try:
-        last = df.iloc[-1]
-        body = abs(last["close"] - last["open"])
-        avg_body = (df["close"] - df["open"]).abs().rolling(window=20).mean().iloc[-1]
-        
-        if pd.isna(avg_body) or avg_body == 0:
-            return False
-        
-        return body > avg_body * multiplier
-    except:
-        return False
 
+        body = abs(
+            df.iloc[-1]["close"] -
+            df.iloc[-1]["open"]
+        )
 
-def check_volume_spike(df, multiplier=1.2):
-    """Всплеск объема"""
-    try:
-        last_vol = df.iloc[-1]["volume"]
-        avg_vol = df["volume"].rolling(window=20).mean().iloc[-1]
-        
-        if pd.isna(avg_vol) or avg_vol == 0:
-            return False
-        
-        return last_vol > avg_vol * multiplier
+        avg = (
+            abs(df["close"] - df["open"])
+            .rolling(20)
+            .mean()
+            .iloc[-1]
+        )
+
+        return body > avg * 1.2
+
     except:
         return False
 
+def volume_spike(df):
 
-def find_fair_value_gap(df):
-    """Fair Value Gap"""
     try:
-        if len(df) < 3:
-            return None
-        
+
+        last = df.iloc[-1]["volume"]
+
+        avg = (
+            df["volume"]
+            .rolling(20)
+            .mean()
+            .iloc[-1]
+        )
+
+        return last > avg * 1.2
+
+    except:
+        return False
+
+def fair_value_gap(df):
+
+    try:
+
         c1 = df.iloc[-3]
-        c2 = df.iloc[-2]
         c3 = df.iloc[-1]
-        
+
         if c1["high"] < c3["low"]:
-            return (float(c1["high"]), float(c3["low"]))
-        
+            return (
+                c1["high"],
+                c3["low"]
+            )
+
         if c1["low"] > c3["high"]:
-            return (float(c3["high"]), float(c1["low"]))
-        
-        return None
+            return (
+                c3["high"],
+                c1["low"]
+            )
+
     except:
-        return None
+        pass
 
+    return None
 
-def analyze_orderbook_bias(bid_vol, ask_vol):
-    """Анализ стакана"""
-    if bid_vol is None or ask_vol is None or (bid_vol == 0 and ask_vol == 0):
-        return "NO_DATA"
-    
-    if ask_vol == 0:
-        return "STRONG_BUY" if bid_vol > 0 else "NO_DATA"
-    if bid_vol == 0:
-        return "STRONG_SELL" if ask_vol > 0 else "NO_DATA"
-    
-    ratio = bid_vol / ask_vol
-    
-    if ratio > 1.3:
-        return "STRONG_BUY"
-    elif ratio > 1.1:
+def orderbook_bias(bids, asks):
+
+    if bids is None or asks is None:
+        return "NEUTRAL"
+
+    if asks == 0:
         return "BUY"
-    elif ratio < 0.7:
-        return "STRONG_SELL"
-    elif ratio < 0.9:
+
+    ratio = bids / asks
+
+    if ratio > 1.2:
+        return "BUY"
+
+    if ratio < 0.8:
         return "SELL"
-    
+
     return "NEUTRAL"
 
+# =========================================================
+# SIGNAL
+# =========================================================
 
-# ================= SIGNAL GENERATION =================
+def generate_signal(df, bids, asks):
 
-def generate_trading_signal(df, bid_vol, ask_vol, ticker=""):
-    """Генерация сигнала"""
-    global steps_failed
-    
-    if df is None or len(df) < 20:
-        return None
-    
-    # Шаг 1: Захват ликвидности
-    side = detect_liquidity_grab(df)
+    side = liquidity_grab(df)
+
     if not side:
-        steps_failed["step1"] += 1
         return None
-    
-    # Шаг 2: Импульс
-    if not check_displacement(df):
-        steps_failed["step2"] += 1
+
+    if not displacement(df):
         return None
-    
-    # Шаг 3: Объем
-    if not check_volume_spike(df):
-        steps_failed["step3"] += 1
+
+    if not volume_spike(df):
         return None
-    
-    # Шаг 4: FVG
-    fvg = find_fair_value_gap(df)
+
+    fvg = fair_value_gap(df)
+
     if not fvg:
-        steps_failed["step4"] += 1
         return None
-    
-    # Шаг 5: Стакан
-    ob_bias = analyze_orderbook_bias(bid_vol, ask_vol)
-    
-    if ob_bias != "NO_DATA":
-        if side == "LONG" and ob_bias in ["SELL", "STRONG_SELL"]:
-            steps_failed["step5"] += 1
-            return None
-        if side == "SHORT" and ob_bias in ["BUY", "STRONG_BUY"]:
-            steps_failed["step5"] += 1
-            return None
-    
-    # Шаг 6: Близость к FVG
-    current_price = df.iloc[-1]["close"]
-    fvg_low, fvg_high = min(fvg), max(fvg)
-    
-    dist_low = abs(current_price - fvg_low) / fvg_low if fvg_low > 0 else 999
-    dist_high = abs(current_price - fvg_high) / fvg_high if fvg_high > 0 else 999
-    
-    if dist_low >= 0.02 and dist_high >= 0.02:
-        steps_failed["step6"] += 1
+
+    bias = orderbook_bias(bids, asks)
+
+    if side == "LONG" and bias == "SELL":
         return None
-    
-    last_time = df['date'].iloc[-1]
-    logger.info(f"🎯 {ticker}: СИГНАЛ {side}! Цена={current_price:.2f} | Свеча: {last_time.strftime('%H:%M:%S')} МСК")
-    
+
+    if side == "SHORT" and bias == "BUY":
+        return None
+
     return {
         "side": side,
-        "price": float(current_price),
+        "price": float(df.iloc[-1]["close"]),
         "fvg": fvg,
-        "bias": ob_bias,
-        "bid_vol": bid_vol or 0,
-        "ask_vol": ask_vol or 0,
-        "volume_ratio": (bid_vol / ask_vol) if (ask_vol and ask_vol > 0) else 0,
-        "timestamp": last_time
+        "bias": bias
     }
 
+# =========================================================
+# TELEGRAM
+# =========================================================
 
-# ================= TELEGRAM =================
+async def send_signal(bot, ticker, signal):
 
-async def send_telegram_signal(ticker, signal, bot):
-    """Отправка сигнала"""
     global signals_found
-    
-    signal_key = f"{ticker}_{signal['side']}_{signal['timestamp'].strftime('%Y%m%d_%H%M')}"
-    if signal_key in last_signals:
-        return
-    
+
+    key = f"{ticker}_{signal['side']}"
+
+    if key in last_signals:
+        if time.time() - last_signals[key] < 3600:
+            return
+
+    emoji = "🟢" if signal["side"] == "LONG" else "🔴"
+
+    text = (
+        f"{emoji} <b>{ticker}</b>\n\n"
+        f"📈 Signal: <b>{signal['side']}</b>\n"
+        f"💵 Price: <b>{signal['price']:.2f}</b>\n"
+        f"📊 Bias: <b>{signal['bias']}</b>\n"
+        f"🎯 FVG: "
+        f"{signal['fvg'][0]:.2f} - "
+        f"{signal['fvg'][1]:.2f}"
+    )
+
     try:
-        fvg_low, fvg_high = min(signal['fvg']), max(signal['fvg'])
-        fvg_mid = (fvg_low + fvg_high) / 2
-        emoji = "🟢" if signal['side'] == "LONG" else "🔴"
-        msk_time = signal['timestamp'].strftime('%H:%M:%S')
-        
-        message = (
-            f"{emoji} <b>{ticker}</b> - <b>{signal['side']}</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"💵 Цена: <b>{signal['price']:.2f}</b>\n"
-            f"📊 FVG: <b>{fvg_low:.2f}</b> - <b>{fvg_high:.2f}</b>\n"
-            f"🎯 Mid: <b>{fvg_mid:.2f}</b>\n"
-            f"📈 Стакан: <b>{signal['bias']}</b>\n"
-            f"⏰ {msk_time} МСК"
+
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=text,
+            parse_mode="HTML"
         )
-        
-        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
-        
-        last_signals[signal_key] = time.time()
+
         signals_found += 1
-        
-        now = time.time()
-        for k in list(last_signals.keys()):
-            if now - last_signals[k] > 3600:
-                del last_signals[k]
-        
-        logger.info(f"📤 Сигнал отправлен: {ticker} {signal['side']}")
-        
+
+        last_signals[key] = time.time()
+
+        logger.info(f"📤 {ticker} {signal['side']}")
+
     except Exception as e:
-        logger.error(f"Ошибка Telegram: {e}")
+        logger.error(f"telegram error: {e}")
 
+# =========================================================
+# PROCESS
+# =========================================================
 
-async def send_hourly_status(bot):
-    """Ежечасный отчет"""
-    global last_status_time
-    
-    current_time = time.time()
-    if current_time - last_status_time < 3600:
-        return
-    
-    last_status_time = current_time
-    
-    try:
-        uptime = time.time() - start_time
-        h, m = int(uptime // 3600), int((uptime % 3600) // 60)
-        total_fails = sum(steps_failed.values())
-        msk_now = get_msk_time()
-        
-        message = (
-            f"📊 <b>ЕЖЕЧАСНЫЙ ОТЧЕТ</b>\n"
-            f"🕐 {msk_now.strftime('%H:%M')} МСК\n\n"
-            f"⏱ Аптайм: {h}ч {m}м\n"
-            f"🔄 Циклов: {total_cycles}\n"
-            f"📤 Сигналов: {signals_found}\n\n"
-            f"📈 Тикеров: {len(TICKERS)}\n"
-            f"✅ С данными: {ticks_with_data}\n"
-            f"❌ Без данных: {ticks_without_data}\n\n"
-            f"<b>Отказы по шагам:</b>\n"
-            f"1️⃣ Захват ликвидности: {steps_failed['step1']}\n"
-            f"2️⃣ Импульс (1.2x): {steps_failed['step2']}\n"
-            f"3️⃣ Объем (1.2x): {steps_failed['step3']}\n"
-            f"4️⃣ FVG: {steps_failed['step4']}\n"
-            f"5️⃣ Стакан: {steps_failed['step5']}\n"
-            f"6️⃣ Расстояние до FVG: {steps_failed['step6']}\n"
-            f"📊 Всего отказов: {total_fails}"
-        )
-        
-        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
-        logger.info("📤 Ежечасный отчет отправлен")
-        
-    except Exception as e:
-        logger.error(f"Ошибка отчета: {e}")
+async def process_ticker(
+    session,
+    ticker,
+    bot
+):
 
+    async with SEM:
 
-# ================= COMMANDS =================
+        try:
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msk_now = get_msk_time()
-    await update.message.reply_text(
-        f"🚀 <b>SMC Trading Bot v13.0</b>\n\n"
-        f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
-        f"📊 Тикеров: {len(TICKERS)}\n"
-        f"⏱ Интервал: {INTERVAL} мин\n"
-        f"🎯 Множители: 1.2x\n"
-        f"📅 Фильтр: строго сегодня\n\n"
-        f"📋 <b>Команды</b>\n"
-        f"▪️ /status - статистика\n"
-        f"▪️ /test - анализ отказов\n"
-        f"▪️ /tickers - список тикеров\n"
-        f"▪️ /signals - сигналы за час\n"
-        f"▪️ /help - справка",
-        parse_mode='HTML'
+            df = await get_candles(
+                session,
+                ticker
+            )
+
+            if df is None:
+                return
+
+            bids, asks = await get_orderbook(
+                session,
+                ticker
+            )
+
+            signal = generate_signal(
+                df,
+                bids,
+                asks
+            )
+
+            if signal:
+                await send_signal(
+                    bot,
+                    ticker,
+                    signal
+                )
+
+        except Exception as e:
+            logger.error(f"{ticker}: {e}")
+
+# =========================================================
+# COMMANDS
+# =========================================================
+
+async def status_cmd(
+    update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    uptime = int(
+        time.time() - start_time
     )
 
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uptime = time.time() - start_time
-    h, m = int(uptime // 3600), int((uptime % 3600) // 60)
-    msk_now = get_msk_time()
-    
-    await update.message.reply_text(
-        f"📊 <b>Статус</b>\n"
-        f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n\n"
-        f"⏱ Аптайм: {h}ч {m}м\n"
-        f"🔄 Циклов: {total_cycles}\n"
-        f"📤 Сигналов: {signals_found}\n"
-        f"✅ С данными: {ticks_with_data}\n"
-        f"❌ Без данных: {ticks_without_data}",
-        parse_mode='HTML'
+    text = (
+        f"📊 BOT STATUS\n\n"
+        f"⏱ Uptime: {uptime}s\n"
+        f"🔄 Cycles: {cycles}\n"
+        f"📤 Signals: {signals_found}\n"
+        f"📈 Tickers: {len(TICKERS)}"
     )
 
-
-async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_fails = sum(steps_failed.values())
-    msk_now = get_msk_time()
-    
-    message = (
-        f"📊 <b>АНАЛИЗ ОТКАЗОВ</b>\n"
-        f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n\n"
-        f"🔄 Циклов: {total_cycles}\n"
-        f"✅ С данными: {ticks_with_data}\n"
-        f"❌ Без данных: {ticks_without_data}\n\n"
-        f"<b>Где отсеиваются сигналы</b>\n"
-        f"1️⃣ Захват ликвидности: {steps_failed['step1']}\n"
-        f"2️⃣ Импульс (1.2x): {steps_failed['step2']}\n"
-        f"3️⃣ Объем (1.2x): {steps_failed['step3']}\n"
-        f"4️⃣ FVG: {steps_failed['step4']}\n"
-        f"5️⃣ Стакан: {steps_failed['step5']}\n"
-        f"6️⃣ Расстояние до FVG: {steps_failed['step6']}\n"
-        f"📊 Всего отказов: {total_fails}"
-    )
-    
-    await update.message.reply_text(message, parse_mode='HTML')
-
-
-async def tickers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tickers_list = "\n".join(f"• {t}" for t in TICKERS)
-    await update.message.reply_text(
-        f"📊 <b>Тикеры ({len(TICKERS)})</b>\n\n{tickers_list}",
-        parse_mode='HTML'
-    )
-
-
-async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    recent = {k: v for k, v in last_signals.items() if time.time() - v < 3600}
-    if not recent:
-        await update.message.reply_text("📊 Нет сигналов за последний час")
-        return
-    
-    # Без HTML для динамических данных, чтобы избежать ошибок парсинга
-    text = f"📊 Сигналы за час ({len(recent)}):\n\n"
-    for key, ts in sorted(recent.items(), key=lambda x: x[1], reverse=True)[:10]:
-        parts = key.split('_')
-        if len(parts) >= 2:
-            emoji = "🟢" if parts[1] == "LONG" else "🔴"
-            time_str = datetime.fromtimestamp(ts).strftime('%H:%M')
-            text += f"{emoji} {parts[0]} - {parts[1]} ({time_str})\n"
-    
     await update.message.reply_text(text)
 
+# =========================================================
+# MAIN LOOP
+# =========================================================
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 <b>SMC Стратегия v13.0</b>\n\n"
-        "🔍 <b>Алгоритм проверки</b>\n"
-        "1️⃣ Захват ликвидности (20 свечей)\n"
-        "2️⃣ Импульс (1.2x среднего)\n"
-        "3️⃣ Объем (1.2x среднего)\n"
-        "4️⃣ Fair Value Gap (3 свечи)\n"
-        "5️⃣ Анализ стакана\n"
-        "6️⃣ Близость к FVG (меньше 2%%)\n\n"
-        "🕐 Время: МСК (UTC+3)\n"
-        "📅 Данные: строго сегодня\n"
-        "⚠️ Будущее время отсеивается\n\n"
-        "📋 <b>Команды</b>\n"
-        "▪️ /start - запуск бота\n"
-        "▪️ /status - текущая статистика\n"
-        "▪️ /test - анализ отказов\n"
-        "▪️ /tickers - список тикеров\n"
-        "▪️ /signals - сигналы за час\n"
-        "▪️ /help - справка",
-        parse_mode='HTML'
+async def scanner(application):
+
+    global cycles
+
+    timeout = aiohttp.ClientTimeout(
+        total=30
     )
 
+    async with aiohttp.ClientSession(
+        timeout=timeout
+    ) as session:
 
-# ================= MAIN LOOP =================
+        bot = application.bot
 
-async def process_ticker(session, ticker, bot):
-    """Обработка одного тикера"""
-    global ticks_with_data, ticks_without_data
-    
-    try:
-        df = await get_candles(session, ticker)
-        if df is None:
-            ticks_without_data += 1
-            return
-        
-        ticks_with_data += 1
-        
-        bid_vol, ask_vol = await get_orderbook(session, ticker)
-        
-        signal = generate_trading_signal(df, bid_vol, ask_vol, ticker)
-        
-        if signal:
-            await send_telegram_signal(ticker, signal, bot)
-            
-    except Exception as e:
-        logger.error(f"❌ {ticker}: {e}")
+        logger.info("BOT STARTED")
 
-
-async def main_loop():
-    """Основной цикл с polling для обработки команд"""
-    global total_cycles, application
-    
-    # Создаем приложение
-    application = Application.builder().token(TOKEN).build()
-    
-    # Добавляем все обработчики команд
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("status", status_cmd))
-    application.add_handler(CommandHandler("test", test_cmd))
-    application.add_handler(CommandHandler("tickers", tickers_cmd))
-    application.add_handler(CommandHandler("signals", signals_cmd))
-    application.add_handler(CommandHandler("help", help_cmd))
-    
-    # Запускаем polling для приема команд
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    logger.info("✅ Telegram polling запущен, команды будут обрабатываться")
-    
-    bot = application.bot
-    
-    timeout = aiohttp.ClientTimeout(total=30)
-    
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        msk_now = get_msk_time()
-        
-        logger.info("=" * 60)
-        logger.info(f"🚀 SMC Trading Bot v13.0 ЗАПУЩЕН | {msk_now.strftime('%H:%M:%S')} МСК")
-        logger.info(f"📊 Тикеров: {len(TICKERS)}")
-        logger.info(f"⏱ Интервал: {INTERVAL} мин")
-        logger.info(f"🎯 Множители: 1.2x")
-        logger.info(f"📅 Фильтр: только сегодня ({msk_now.strftime('%Y-%m-%d')})")
-        logger.info(f"⚠️ Будущее время отсеивается")
-        logger.info("=" * 60)
-        
-        try:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"✅ <b>Бот v13.0 запущен!</b>\n\n"
-                     f"🕐 {msk_now.strftime('%H:%M:%S')} МСК\n"
-                     f"📊 {len(TICKERS)} тикеров\n"
-                     f"📅 Строго сегодняшние данные\n\n"
-                     f"📋 <b>Команды бота</b>\n"
-                     f"▪️ /status - статистика\n"
-                     f"▪️ /test - анализ отказов\n"
-                     f"▪️ /tickers - список тикеров\n"
-                     f"▪️ /signals - сигналы за час\n"
-                     f"▪️ /help - справка",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error(f"Не удалось отправить стартовое сообщение: {e}")
-        
-        # Основной цикл сканирования
         while True:
-            try:
-                total_cycles += 1
-                
-                # Вычисляем время до следующей минуты
-                now = time.time()
-                seconds_to_next = (INTERVAL * 60) - (now % (INTERVAL * 60))
-                wait_time = max(seconds_to_next + 1, 1)
-                
-                logger.info(f"⏳ Цикл #{total_cycles}: ожидание {wait_time:.0f}с")
-                await asyncio.sleep(wait_time)
-                
-                msk_now = get_msk_time()
-                logger.info(f"🔄 Цикл #{total_cycles}: сканирование... ({msk_now.strftime('%H:%M:%S')} МСК)")
-                
-                # Запускаем обработку всех тикеров параллельно
-                tasks = [process_ticker(session, ticker, bot) for ticker in TICKERS]
-                await asyncio.gather(*tasks, return_exceptions=True)
-                
-                logger.info(f"✅ Цикл #{total_cycles}: данных: {ticks_with_data}, без данных: {ticks_without_data}, сигналов: {signals_found}")
-                
-                # Отправляем ежечасный отчет
-                await send_hourly_status(bot)
-                
-            except asyncio.CancelledError:
-                break
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                logger.error(f"Ошибка цикла: {e}")
-                await asyncio.sleep(60)
-    
-    # Останавливаем polling при завершении
-    await application.updater.stop()
-    await application.stop()
 
+            try:
+
+                if not market_is_open():
+
+                    logger.info(
+                        "Market closed"
+                    )
+
+                    await asyncio.sleep(60)
+
+                    continue
+
+                cycles += 1
+
+                logger.info(
+                    f"Cycle #{cycles}"
+                )
+
+                tasks = [
+                    process_ticker(
+                        session,
+                        ticker,
+                        bot
+                    )
+                    for ticker in TICKERS
+                ]
+
+                await asyncio.gather(
+                    *tasks,
+                    return_exceptions=True
+                )
+
+                logger.info(
+                    f"Cycle done | "
+                    f"signals={signals_found}"
+                )
+
+                await asyncio.sleep(
+                    INTERVAL * 60
+                )
+
+            except Exception as e:
+
+                logger.error(
+                    f"scanner error: {e}"
+                )
+
+                await asyncio.sleep(30)
+
+# =========================================================
+# MAIN
+# =========================================================
+
+async def main():
+
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "status",
+            status_cmd
+        )
+    )
+
+    await app.initialize()
+    await app.start()
+
+    await app.updater.start_polling()
+
+    asyncio.create_task(
+        scanner(app)
+    )
+
+    logger.info("Polling started")
+
+    while True:
+        await asyncio.sleep(3600)
+
+# =========================================================
 
 if __name__ == "__main__":
+
     try:
-        start_time = time.time()
-        logger.info("Запуск SMC Trading Bot v13.0...")
-        asyncio.run(main_loop())
+
+        asyncio.run(main())
+
     except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
-    except Exception as e:
-        logger.critical(f"Критическая ошибка: {e}", exc_info=True)
-    finally:
-        logger.info("Бот завершил работу")
+
+        logger.info("Stopped")
